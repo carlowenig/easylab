@@ -1,3 +1,4 @@
+from functools import cache
 from ..lang import lang
 from ..util import Text
 from . import dims
@@ -7,25 +8,27 @@ from .unit import Unit
 one = Unit("1")
 """Unit 1. Represents unitless values."""
 
-m = metre = Unit("m", dim=dims.length)
+m = metre = Unit(Text("m", long="metre", plural="metres"), dim=dims.length)
 """Metre (m) is the SI base unit of length."""
 
-s = second = Unit("s", dim=dims.time)
+s = second = Unit(Text("s", long="second", plural="seconds"), dim=dims.time)
 """Second (s) is the SI base unit of time."""
 
-g = gram = Unit("g", dim=dims.mass, scale=1e-3)
+g = gram = Unit(Text("g", long="gram", plural="grams"), dim=dims.mass, scale=1e-3)
 """Gram = g = 1/1000 kg"""
 
-A = ampere = Unit("A", dim=dims.current)
+A = ampere = Unit(Text("A", long="ampere"), dim=dims.current)
 """Ampere (A) is the SI base unit of electric current."""
 
-K = kelvin = Unit("K", dim=dims.temperature)
+K = kelvin = Unit(Text("K", long="kelvin"), dim=dims.temperature)
 """Kelvin (K) is the SI base unit of temperature."""
 
-mol = mole = Unit("mol", dim=dims.amount_of_substance)
+mol = mole = Unit(
+    Text("mol", long="mole", plural="moles"), dim=dims.amount_of_substance
+)
 """Mole (mol) is the SI base unit of amount of substance."""
 
-cd = candela = Unit("cd", dim=dims.luminous_intensity)
+cd = candela = Unit(Text("cd", long="candela"), dim=dims.luminous_intensity)
 """Candela (cd) is the SI base unit of luminous intensity."""
 
 # PREFIXES
@@ -157,3 +160,45 @@ lx = lux = lm / m ** 2 | "lx"
 degC = degree_celsius = K | "degC"
 """Degree Celsius (°C) is a unit of temperature."""
 degC.offset = 273.15
+
+
+# Helper functions
+def _collect_units_with_names():
+    """Collect all units with names."""
+    units_with_names: dict[Unit, list[str]] = {}
+
+    for name, value in globals().items():
+        if isinstance(value, Unit):
+            if value not in units_with_names:
+                units_with_names[value] = []
+            units_with_names[value].append(name)
+
+    return units_with_names
+
+
+all_with_names = _collect_units_with_names()
+all = list(all_with_names.keys())
+
+
+def _collect_units_by_query_strings():
+    results: dict[str, Unit] = {}
+    for unit, names in all_with_names.items():
+        for name in names:
+            results[name] = unit
+        for query_string in unit.label.query_strings:
+            results[query_string] = unit
+    return results
+
+
+all_by_query_strings = _collect_units_by_query_strings()
+
+
+def find_or_none(query: str):
+    return all_by_query_strings.get(query)
+
+
+def find(query: str):
+    result = find_or_none(query)
+    if result is None:
+        raise ValueError(f"No unit found for query '{query}'.")
+    return result

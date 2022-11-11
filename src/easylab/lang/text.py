@@ -1,4 +1,5 @@
-from typing import Any, Callable, Union
+from abc import ABC, abstractmethod
+from typing import Any, Callable, Iterable, Union
 from typing_extensions import TypeGuard
 
 TextInput = Union[str, dict[str, str], tuple[str, dict[str, str]], "Text", None]
@@ -65,6 +66,10 @@ class Text:
 
     def has_target(self, target: str) -> bool:
         return target in self._target_strings
+
+    @property
+    def targets(self):
+        return set(self._target_strings.keys())
 
     def string(self, target: str):
         return self._target_strings.get(target, self._default)
@@ -144,5 +149,49 @@ class Text:
 
         return self.transform(fill_args)
 
+    @property
+    def query_strings(self):
+        return (self._default, *self._target_strings.values())
+
     def matches(self, query: str):
-        return self.default == query or query in self._target_strings.values()
+        return query in self.query_strings
+
+    def join(self, parts: Iterable[TextInput]):
+        parts = [Text.parse(part) for part in parts]
+
+        default = self.default.join(part.default for part in parts)
+
+        targets = set(self.targets)
+        for part in parts:
+            targets.update(part.targets)
+
+        target_strings: dict[str, str] = {}
+        for target in targets:
+            target_strings[target] = self.string(target).join(
+                part.string(target) for part in parts
+            )
+
+        return Text(default, **target_strings)
+
+    def extend(self, **target_strings: str):
+        return Text(self._default, **{**self._target_strings, **target_strings})
+
+
+def text(input: Any):
+    if hasattr(input, "text"):
+        return text(getattr(input, "text"))
+
+    return Text.parse(input)
+
+
+class HasText(ABC):
+    @property
+    @abstractmethod
+    def text(self) -> Text:
+        pass
+
+    def __str__(self) -> str:
+        return self.text.default
+
+    def __repr__(self) -> str:
+        return self.text.string("repr")

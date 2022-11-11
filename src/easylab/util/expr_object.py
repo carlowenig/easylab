@@ -1,3 +1,4 @@
+from abc import abstractclassmethod, abstractmethod
 from copy import copy
 from typing import (
     Any,
@@ -10,6 +11,7 @@ from typing import (
 from typing_extensions import Self
 import numpy as np
 import sympy
+from sympy.printing.str import StrPrinter
 
 from ..lang.text import Text, TextInput
 
@@ -31,80 +33,183 @@ _numpy_to_sympy_name_mappings = {
 }
 
 
+class ExprPrinter(StrPrinter):
+    def _print_Pow(self, expr, rational=False):
+        return super()._print_Pow(expr, rational).replace("**", "^")
+
+
 class ExprObject:
-    _expr: sympy.Expr
+    _label: Optional[Text]
+    _expr: Optional[sympy.Expr]
     _dependencies: tuple["ExprObject", ...]
 
     def __init__(
-        self, expr: Union[str, sympy.Expr], dependencies: Iterable["ExprObject"] = []
+        self,
+        *,
+        expr: Optional[sympy.Expr] = None,
+        label: Optional[TextInput] = None,
+        dependencies: Iterable["ExprObject"] = [],
     ) -> None:
-        self._expr = sympy.Symbol(expr) if isinstance(expr, str) else expr
+        if expr is not None and not isinstance(expr, sympy.Expr):
+            raise TypeError(
+                f"expr must be a string or sympy.Expr, got {type(expr).__name__}."
+            )
+
+        for dep in dependencies:
+            if not isinstance(dep, ExprObject):
+                raise TypeError(
+                    f"dependencies must be LabeledExprObjects, got {type(dep).__name__}."
+                )
+
+        if expr is None and label is None:
+            raise ValueError("Either expr or label must be specified.")
+
+        self._expr = expr
         self._dependencies = tuple(dict.fromkeys(dependencies))  # Remove duplicates
 
+        if expr is None and len(self._dependencies) > 0:
+            raise ValueError("expr must be specified if object has dependencies.")
+
+        self._label = Text.parse(label) if label is not None else None
+
+    # @classmethod
+    # def from_expr(
+    #     cls, expr: sympy.Expr, dependencies: list["LabeledExprObject"]
+    # ) -> Self:
+    #     if not isinstance(expr, sympy.Expr):
+    #         raise TypeError(f"expr must be a sympy.Expr, not {type(expr)}.")
+
+    #     expr = sympy.simplify(expr)
+
+    #     # Do not use the subclasses __init__ method, because this will probably be used to create
+    #     # the object without an expression. Use __init_from_expr__ instead.
+    #     obj: Self = object.__new__(cls, expr, dependencies)  # type: ignore
+    #     ExprObject.__init__(obj, expr, dependencies)
+
+    #     obj.__init_from_expr__()
+
+    #     return obj
     @classmethod
-    def from_expr(cls, expr: sympy.Expr, dependencies: list["ExprObject"]) -> Self:
-        expr = sympy.simplify(expr)
+    def labeled(cls, label: Text) -> Self:
+        return cls(label=label)
 
-        # Do not use the subclasses __init__ method, because this will probably be used to create
-        # the object without an expression. Use __init_from_expr__ instead.
-        obj: Self = object.__new__(cls, expr, dependencies)  # type: ignore
-        ExprObject.__init__(obj, expr, dependencies)
-
-        obj.__init_from_expr__()
-        return obj
+    @classmethod
+    def from_expr(cls, expr: sympy.Expr, dependencies: Iterable["ExprObject"]) -> Self:
+        return cls(expr=expr, dependencies=dependencies)
 
     @property
-    def expr(self) -> sympy.Expr:
+    def expr(self) -> Optional[sympy.Expr]:
         return self._expr
-
-    @property
-    def text(self) -> Text:
-        return Text(
-            str(self._expr),
-            unicode=sympy.pretty(self._expr, use_unicode=True, wrap_line=False),
-            latex=sympy.latex(self._expr),
-        )
 
     @property
     def dependencies(self) -> tuple["ExprObject", ...]:
         return self._dependencies
 
-    def __init_from_expr__(self):
-        pass
+    @property
+    def label(self) -> Optional[Text]:
+        return self._label
 
-    def create_eval_function(self) -> Callable:
-        return sympy.lambdify([dep._expr for dep in self._dependencies], self._expr)
+    def ensure_has_expr(self):
+        if self._expr is None:
+            raise ValueError(
+                f"{type(self).__name__} labeled '{self.label_or_fail().default}' has no expr."
+            )
 
-    def eval(self, *dependency_values):
-        return self.create_eval_function()(*dependency_values)
+    def expr_or_fail(self):
+        self.ensure_has_expr()
+        return cast(sympy.Expr, self._expr)
+
+    def ensure_has_label(self):
+        if self._label is None:
+            raise ValueError(
+                f"{type(self).__name__} with expr '{self.expr_or_fail()}' has no label."
+            )
+
+    def label_or_fail(self):
+        self.ensure_has_label()
+        return cast(Text, self._label)
+
+    @property
+    def expr_text(self):
+        self.ensure_has_expr()
+        return Text(
+            str(self._expr),
+            unicode=ExprPrinter().doprint(self._expr),
+            latex=sympy.latex(self._expr),
+        )
+
+    @property
+    def text(self) -> Text:
+        if self._label is not None:
+            return self._label
+        else:
+            return self.expr_text
+
+    @classmethod
+    def create_eval_function(
+        cls, expr: sympy.Expr, dependencies: Iterable["ExprObject"]
+    ) -> Callable:
+
+        # from sympy.utilities.lambdify import lambdastr
+
+        # print(lambdastr([dep._expr for dep in self._dependencies], self._expr))
+
+        return sympy.lambdify([dep._expr for dep in dependencies], expr)
+
+    @classmethod
+    def eval(cls, expr: sympy.Expr, dependency_values: dict["ExprObject", Any]):
+        return cls.create_eval_function(expr, dependency_values.keys())(
+            *dependency_values.values()
+        )
 
     def __check_operation__(self, name: str, *args) -> None:
         pass
+
+    def __is_one__(self) -> bool:
+        return self._label is not None and self._label.default == "1"
+
+    def __is_zero__(self) -> bool:
+        return self._label is not None and self._label.default == "0"
 
     def __run_operation__(self, name: str, *args) -> Self:
         self.__check_operation__(name, *args)
 
         if len(self._dependencies) == 0:
-            dependencies = [cast(ExprObject, self)]
+            if isinstance(self, ExprObject):
+                dependencies = [self]
+            else:
+                dependencies = []
         else:
             dependencies = list(self._dependencies)
 
         sympy_args = []
         for arg in args:
             if isinstance(arg, ExprObject):
-                sympy_args.append(arg._expr)
+                if arg.__is_zero__():
+                    sympy_args.append(sympy.sympify(0))
+                elif arg.__is_one__():
+                    sympy_args.append(sympy.sympify(1))
+                else:
+                    sympy_args.append(arg._expr)
 
-                if len(arg._dependencies) == 0:
-                    dependencies.append(arg)
-                for dep in arg._dependencies:
-                    if dep not in dependencies:
-                        dependencies.append(dep)
+                    if len(arg._dependencies) == 0:
+                        dependencies.append(arg)
+                    for dep in arg._dependencies:
+                        if dep not in dependencies:
+                            dependencies.append(dep)
             else:
-                sympy_args.append(arg)
+                sympy_args.append(sympy.sympify(arg))
 
-        return type(self).from_expr(
-            getattr(self._expr, name)(*sympy_args), dependencies
-        )
+        # print("argtypes:", [type(arg) for arg in sympy_args])
+
+        expr = getattr(self._expr, name)(*sympy_args)
+
+        if not isinstance(expr, sympy.Expr):
+            raise TypeError(
+                f"Operation {name}({', '.join(sympy_args)}) on {self._expr} returned {expr}, which is not a sympy.Expr."
+            )
+
+        return type(self).from_expr(expr, dependencies)
 
     def __add__(self, other: Any) -> Self:
         return self.__run_operation__("__add__", other)
@@ -154,7 +259,10 @@ class ExprObject:
             return NotImplemented
 
         if len(self._dependencies) == 0:
-            dependencies = [cast(ExprObject, self)]
+            if isinstance(self, ExprObject):
+                dependencies = [self]
+            else:
+                dependencies = []
         else:
             dependencies = list(self._dependencies)
         sympy_args = []
@@ -174,18 +282,40 @@ class ExprObject:
 
         name = _numpy_to_sympy_name_mappings.get(ufunc.__name__, ufunc.__name__)
         expr = getattr(sympy, name)(*sympy_args)
+
+        if not isinstance(expr, sympy.Expr):
+            raise TypeError(
+                f"Array ufunc '{name}' {type(self).__name__} returned {expr}, which is not a sympy.Expr."
+            )
+
         return type(self).from_expr(expr, dependencies)
 
+    def __or__(self, label: TextInput):
+        result = copy(self)
+        # print("relabel", label, result)
+        result._label = Text.parse(label)
+        return result
+
     def __eq__(self, other: Any) -> bool:
-        return (
-            isinstance(other, ExprObject)
-            and type(self) == type(other)
-            and sympy.simplify(self._expr - other._expr) == 0
-            and self._dependencies == other._dependencies
-        )
+        if self is other:
+            return True
+
+        if (
+            not isinstance(other, ExprObject)
+            or type(self) != type(other)
+            or self._label != other._label
+            or self._dependencies != other._dependencies
+            or self._expr is None != other._expr is None
+        ):
+            return False
+
+        if self._expr is not None:
+            return sympy.simplify(self._expr - other._expr) == 0
+
+        return True
 
     def __hash__(self) -> int:
-        return hash(self._expr)
+        return hash((self._expr, self._dependencies))
 
     def __str__(self) -> str:
         return str(self._expr)
@@ -194,32 +324,35 @@ class ExprObject:
         return f"{type(self).__name__}({self._expr}, dependencies={self._dependencies})"
 
 
-class LabeledExprObject(ExprObject):
-    _label: Text
+# class LabeledExprObject(ExprObject):
+#     _label: Text
 
-    def __init__(self, label: TextInput) -> None:
-        self.label = label
-        super().__init__(sympy.Symbol(self.label.default), [])
+#     def __init__(self, label: TextInput) -> None:
+#         self.label = label
+#         super().__init__(sympy.Symbol(self.label.default), [])
 
-    def __init_from_expr__(self):
-        self._label = super().text
+#     def __init_from_expr__(self):
+#         self._label = super().text
 
-    @property
-    def label(self) -> Text:
-        return self._label
+#     @property
+#     def label(self) -> Text:
+#         return self._label
 
-    @label.setter
-    def label(self, label: TextInput) -> None:
-        self._label = Text.parse(label)
+#     @label.setter
+#     def label(self, label: TextInput) -> None:
+#         self._label = Text.parse(label)
+#         self._expr = sympy.Symbol(self._label.default)
+#         # print("changed label to", self._label.default, "expr", self._expr)
 
-    def __or__(self, label: TextInput):
-        result = copy(self)
-        result.label = label
-        return result
+#     def __or__(self, label: TextInput):
+#         result = copy(self)
+#         # print("relabel", label, result)
+#         result.label = label
+#         return result
 
-    @property
-    def text(self) -> Text:
-        return self._label
+#     @property
+#     def text(self) -> Text:
+#         return self._label
 
-    def __str__(self) -> str:
-        return self._label.default
+#     def __str__(self) -> str:
+#         return self._label.default

@@ -17,157 +17,157 @@ from . import constraint
 
 
 from ..lang import TextInput, Text
-from ..util import LabeledExprObject, AutoNamed
+from ..util import ExprObject, AutoNamed
 
 
 _T = TypeVar("_T")
 
 
-class Scope(AutoNamed):
-    _parent: "Scope"
-    _vars: list["Var"]
-    _children: list["Scope"]
+# class Scope(AutoNamed):
+#     _parent: "Scope"
+#     _vars: list["Var"]
+#     _children: list["Scope"]
 
-    def __init__(
-        self,
-        name: Optional[str] = None,
-        *,
-        parent: Optional["Scope"] = None,
-    ) -> None:
-        self.__init_auto_named__(name)
+#     def __init__(
+#         self,
+#         name: Optional[str] = None,
+#         *,
+#         parent: Optional["Scope"] = None,
+#     ) -> None:
+#         self.__init_auto_named__(name)
 
-        if parent != "__UNSET__":
-            self._parent = parent or current_scope
-            self._parent._children.append(self)
+#         if parent != "__UNSET__":
+#             self._parent = parent or current_scope
+#             self._parent._children.append(self)
 
-        self._vars = []
-        self._children = []
+#         self._vars = []
+#         self._children = []
 
-    @property
-    def vars(self) -> list["Var"]:
-        return list(self._vars)
+#     @property
+#     def vars(self) -> list["Var"]:
+#         return list(self._vars)
 
-    @property
-    def children(self) -> list["Scope"]:
-        return list(self._children)
+#     @property
+#     def children(self) -> list["Scope"]:
+#         return list(self._children)
 
-    @property
-    def name(self) -> str:
-        return self._name
+#     @property
+#     def name(self) -> str:
+#         return self._name
 
-    @property
-    def parent(self) -> "Scope":
-        return self._parent
+#     @property
+#     def parent(self) -> "Scope":
+#         return self._parent
 
-    @property
-    def ancestors(self) -> list["Scope"]:
-        if self.is_global:
-            return []
-        else:
-            return [self.parent] + self.parent.ancestors
+#     @property
+#     def ancestors(self) -> list["Scope"]:
+#         if self.is_global:
+#             return []
+#         else:
+#             return [self.parent] + self.parent.ancestors
 
-    @property
-    def is_global(self):
-        return self is global_scope
+#     @property
+#     def is_global(self):
+#         return self is global_scope
 
-    def is_child_of(self, other: "Scope"):
-        return other in self.ancestors
+#     def is_child_of(self, other: "Scope"):
+#         return other in self.ancestors
 
-    def _add(self, var: "Var"):
-        if var in self._vars:
-            return
+#     def _add(self, var: "Var"):
+#         if var in self._vars:
+#             return
 
-        if any(v.name == var.name for v in self._vars):
-            raise RuntimeError(
-                f"There already exists a variable named '{var.name}' in scope {self.name}."
-            )
+#         if any(v.name == var.name for v in self._vars):
+#             raise RuntimeError(
+#                 f"There already exists a variable named '{var.name}' in scope {self.name}."
+#             )
 
-        self._vars.append(var)
-        self.__dict__[var.name] = var
+#         self._vars.append(var)
+#         self.__dict__[var.name] = var
 
-    def index(self, query: Any) -> Optional[int]:
-        for i, var in enumerate(self._vars):
-            if var == query or var.name == query:
-                return i
+#     def index(self, query: Any) -> Optional[int]:
+#         for i, var in enumerate(self._vars):
+#             if var == query or var.name == query:
+#                 return i
 
-    def get(self, query: Any, *, ancestors: bool = True) -> Optional["Var"]:
-        index = self.index(query)
+#     def get(self, query: Any, *, ancestors: bool = True) -> Optional["Var"]:
+#         index = self.index(query)
 
-        if index is not None:
-            return self._vars[index]
+#         if index is not None:
+#             return self._vars[index]
 
-        if ancestors and self._parent is not None:
-            return self._parent.get(query, ancestors=True)
+#         if ancestors and self._parent is not None:
+#             return self._parent.get(query, ancestors=True)
 
-    def __getitem__(self, query: Any) -> Optional["Var"]:
-        return self.get(query)
+#     def __getitem__(self, query: Any) -> Optional["Var"]:
+#         return self.get(query)
 
-    def __contains__(self, query: Any) -> bool:
-        return self.get(query) is not None
+#     def __contains__(self, query: Any) -> bool:
+#         return self.get(query) is not None
 
-    def __enter__(self):
-        if current_scope is not self._parent:
-            raise RuntimeError(
-                f"Cannot enter scope {self.name} (child of {self.parent.name}) because the current scope is {current_scope.name}."
-            )
-        set_current_scope(self)
+#     def __enter__(self):
+#         if current_scope is not self._parent:
+#             raise RuntimeError(
+#                 f"Cannot enter scope {self.name} (child of {self.parent.name}) because the current scope is {current_scope.name}."
+#             )
+#         set_current_scope(self)
 
-    def __exit__(self, type, value, traceback):
-        set_current_scope(self.parent)
+#     def __exit__(self, type, value, traceback):
+#         set_current_scope(self.parent)
 
-    def tree(self, *, include_hidden_vars: bool = False) -> str:
-        return (
-            self.name
-            + "".join(
-                f"\n| {v.name}: {v.type}"
-                for v in self.vars
-                if include_hidden_vars or not v.is_hidden
-            )
-            + "".join(
-                "\n|\no-- " + s.tree.replace("\n", "\n|   ") for s in self.children
-            )
-        )
+#     def tree(self, *, include_hidden_vars: bool = False) -> str:
+#         return (
+#             self.name
+#             + "".join(
+#                 f"\n| {v.name}: {v.type}"
+#                 for v in self.vars
+#                 if include_hidden_vars or not v.is_hidden
+#             )
+#             + "".join(
+#                 "\n|\no-- " + s.tree.replace("\n", "\n|   ") for s in self.children
+#             )
+#         )
 
-    def __str__(self) -> str:
-        return self.name
+#     def __str__(self) -> str:
+#         return self.name
 
-    def __repr__(self):
-        return f"<Scope {self.name}>"
-
-
-global_scope = Scope(name="global", parent=cast(Scope, "__UNSET__"))
-global_scope._parent = global_scope
-
-current_scope = global_scope
+#     def __repr__(self):
+#         return f"<Scope {self.name}>"
 
 
-def set_current_scope(scope: Scope):
-    global current_scope
-    current_scope = scope
+# global_scope = Scope(name="global", parent=cast(Scope, "__UNSET__"))
+# global_scope._parent = global_scope
+
+# current_scope = global_scope
 
 
-def pop_current_scope():
-    set_current_scope(current_scope.parent)
+# def set_current_scope(scope: Scope):
+#     global current_scope
+#     current_scope = scope
 
 
-def get_common_scope(*scopes: Scope):
-    if len(scopes) == 0:
-        return global_scope
+# def pop_current_scope():
+#     set_current_scope(current_scope.parent)
 
-    common = scopes[0]
-    if common.is_global:
-        return global_scope
 
-    for scope in scopes[1:]:
-        if scope.is_global:
-            return global_scope
+# def get_common_scope(*scopes: Scope):
+#     if len(scopes) == 0:
+#         return global_scope
 
-        if scope != common:
-            for ancestor in scope.ancestors:
-                if ancestor in common.ancestors:
-                    common = ancestor
-                    break
-    return common
+#     common = scopes[0]
+#     if common.is_global:
+#         return global_scope
+
+#     for scope in scopes[1:]:
+#         if scope.is_global:
+#             return global_scope
+
+#         if scope != common:
+#             for ancestor in scope.ancestors:
+#                 if ancestor in common.ancestors:
+#                     common = ancestor
+#                     break
+#     return common
 
 
 def handle_check_result(result: Any):
@@ -180,7 +180,7 @@ def handle_check_result(result: Any):
 OutputTarget = Literal["plot", "plot_err"]
 
 
-class Var(LabeledExprObject, Generic[_T], AutoNamed):
+class Var(ExprObject, Generic[_T], AutoNamed):
     name: str
     default: Optional[_T]
     type: Type[_T]
@@ -188,7 +188,7 @@ class Var(LabeledExprObject, Generic[_T], AutoNamed):
     _parse_func: Optional[Callable[[Any], _T]]
     _check_func: Optional[Callable[[_T], Union[bool, str, None]]]
     _output_func: Optional[Callable[[_T, OutputTarget], Any]]
-    _scope: Scope
+    # _scope: Scope
 
     def __init__(
         self,
@@ -200,7 +200,7 @@ class Var(LabeledExprObject, Generic[_T], AutoNamed):
         parse: Optional[Callable[[Any], _T]] = None,
         check: Optional[Callable[[_T], Union[bool, str, None]]] = None,
         output: Optional[Callable[[_T, OutputTarget], Any]] = None,
-        scope: Optional[Scope] = None,
+        # scope: Optional[Scope] = None,
         name: Optional[str] = None,
         auto_name: bool = True,
     ):
@@ -211,7 +211,7 @@ class Var(LabeledExprObject, Generic[_T], AutoNamed):
         self._parse_func = parse
         self._check_func = check
         self._output_func = output
-        self._scope = scope or current_scope
+        # self._scope = scope or current_scope
 
         self.__init_auto_named__(
             name,
@@ -224,7 +224,7 @@ class Var(LabeledExprObject, Generic[_T], AutoNamed):
 
         super().__init__(label)
 
-        self._scope._add(self)
+        # self._scope._add(self)
 
     def __init_from_expr__(self):
         super().__init_from_expr__()
@@ -264,7 +264,7 @@ class Var(LabeledExprObject, Generic[_T], AutoNamed):
         self._format_func = None
         self._parse_func = None
         self._check_func = None
-        self._scope = get_common_scope(*(dep.scope for dep in var_deps))
+        # self._scope = get_common_scope(*(dep.scope for dep in var_deps))
 
     @property
     def is_computed(self):
@@ -278,18 +278,18 @@ class Var(LabeledExprObject, Generic[_T], AutoNamed):
     def var_dependencies(self):
         return cast(list[Var], self.dependencies)
 
-    @property
-    def scope(self):
-        return self._scope
+    # @property
+    # def scope(self):
+    #     return self._scope
 
-    def is_in_scope(self, scope: Scope, *, include_ancestors: bool = True) -> bool:
-        if self.scope is scope:
-            return True
-        if include_ancestors:
-            for ancestor in self.scope.ancestors:
-                if self.scope == ancestor:
-                    return True
-        return False
+    # def is_in_scope(self, scope: Scope, *, include_ancestors: bool = True) -> bool:
+    #     if self.scope is scope:
+    #         return True
+    #     if include_ancestors:
+    #         for ancestor in self.scope.ancestors:
+    #             if self.scope == ancestor:
+    #                 return True
+    #     return False
 
     def __lt__(self, other: Any) -> "constraint.BoundsConstraint[_T]":  # type: ignore
         return constraint.BoundsConstraint(self, max=other, include_max=False)  # type: ignore

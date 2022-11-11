@@ -77,6 +77,7 @@ pm = plus_minus = Text("+/-", unicode="±", latex="\\pm ")
 cdot = Text("⋅", latex="\\cdot ")
 times = Text("×", latex="\\times ")
 frac = Text("%1 / %2", latex="\\frac{%1}{%2} ")
+degree = Text("deg", unicode="°", latex="^\\circ ")
 
 d = Text("d", latex="\\mathrm{d} ")
 pd = partial = Text("∂", latex="\\partial ")
@@ -89,6 +90,11 @@ substack = Text("(%1 / %2)", latex="\\substack{%1 \\ %2} ")
 par = parentheses = Text("(%)", latex="\\left( % \\right) ")
 brack = brackets = Text("[%]", latex="\\left[ % \\right] ")
 curly = curly_brackets = Text("{%}", latex="\\left\\{ % \\right\\} ")
+
+lt = less_than = Text("<", latex="\\lt ")
+gt = greater_than = Text(">", latex="\\gt ")
+leq = less_than_or_equal = Text("<=", latex="\\leq ")
+geq = greater_than_or_equal = Text(">=", latex="\\geq ")
 
 
 def number(value: Any, precision: Optional[int] = None, decimal: str = ",") -> Text:

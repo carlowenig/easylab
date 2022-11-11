@@ -1,15 +1,16 @@
-from cProfile import label
-from typing import Optional
+from typing import Literal, Optional, Union
+
 import sympy
-
-
-from . import dims
+from . import dims, units
 from .dim import Dim
 from ..lang import Text, TextInput, lang
-from ..util import LabeledExprObject
+from ..util import ExprObject
 
 
-class Unit(LabeledExprObject):
+UnitInput = Union["Unit", str, Literal[1], None]
+
+
+class Unit(ExprObject):
     dim: Dim
     scale: float
     offset: float
@@ -24,8 +25,8 @@ class Unit(LabeledExprObject):
     ) -> None:
 
         self.dim = dim
-        self.scale = scale
-        self.offset = offset
+        self.scale = float(scale)
+        self.offset = float(offset)
 
         super().__init__(label)
 
@@ -47,7 +48,49 @@ class Unit(LabeledExprObject):
 
         self.dim = f(*(dep.dim for dep in unit_deps))
         self.scale = f(*(dep.scale for dep in unit_deps))
-        self.offset = 0  # TODO
+        print([dep.scale for dep in unit_deps])
+        print(self.scale)
+        self.offset = 0.0  # TODO
+
+        if not isinstance(self.dim, Dim):
+            raise ValueError(
+                f"Could not create derived unit from expression {self._expr}. Got invalid dim {self.dim}."
+            )
+
+        if not isinstance(self.scale, (int, float)):
+            raise ValueError(
+                f"Could not create derived unit from expression {self._expr}. Got invalid scale {self.scale}."
+            )
+
+        self.scale = float(self.scale)
+        self.name = None
+
+    @staticmethod
+    def parse(input: UnitInput):
+        if input is None or input == 1:
+            return units.one
+        elif isinstance(input, Unit):
+            return input
+        elif isinstance(input, str):
+            expr: sympy.Expr = sympy.parse_expr(input)
+            deps = []
+            subs = []
+            for symb in expr.free_symbols:
+                if symb.name in units.all_by_query_strings:
+                    unit = units.all_by_query_strings[symb.name]
+                    deps.append(unit)
+                    print(unit, unit.label.default)
+                    subs.append((symb, unit.label.default))
+
+            expr = expr.subs(subs)
+            print("expr", expr, repr(expr))
+
+            return Unit.from_expr(expr, deps)
+
+        raise ValueError(f"Cannot parse unit from {input}.")
+
+    def __is_one__(self) -> bool:
+        return self.dim.__is_one__() and self.scale == 1 and self.offset == 0
 
     @property
     def label(self) -> Text:
@@ -55,21 +98,30 @@ class Unit(LabeledExprObject):
 
     @label.setter
     def label(self, label: TextInput):
-        self._label = lang.mathrm(Text.parse(label))
+        super(Unit, type(self)).label.fset(self, lang.mathrm(Text.parse(label)))  # type: ignore
 
-    def prefix(self, prefix_unit: "Unit"):
+    def prefix(self, prefix_unit: UnitInput):
+        prefix_unit = Unit.parse(prefix_unit)
         if self.label is None or prefix_unit.label is None:
             raise ValueError("Cannot prefix units without labels.")
 
-        result = prefix_unit * self
-        result.label = prefix_unit.label + self.label
-        return result
+        return Unit(
+            prefix_unit.label + self.label,
+            dim=prefix_unit.dim * self.dim,
+            scale=prefix_unit.scale * self.scale,
+        )
 
-    def __mod__(self, other: "Unit") -> "Unit":
-        return other.prefix(self)
+    def __mod__(self, other: UnitInput) -> "Unit":
+        return Unit.parse(other).prefix(self)
 
-    def convert(self, value: float, to: "Unit"):
-        if self.dim != to.dim:
-            raise ValueError(f"Cannot convert from unit {self} to {to}.")
+    def is_convertable_to(self, other: UnitInput) -> bool:
+        return self.dim == Unit.parse(other).dim
+
+    def convert(self, value: float, to: UnitInput):
+        to = Unit.parse(to)
+        if not self.is_convertable_to(to):
+            raise ValueError(
+                f"Cannot convert from unit {self} to unit {to}, since they have different dimensions {self.dim} and {to.dim}, respectively."
+            )
 
         return (value - self.offset) * self.scale / to.scale + to.offset

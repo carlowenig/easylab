@@ -1,14 +1,21 @@
-from dataclasses import dataclass
-from typing import Union
-
-import sympy
-from ..lang import Text, TextInput
+from ..lang import TextInput
 
 from ..util import LabeledExprObject
 
 
 class Dim(LabeledExprObject):
-    pass
+    is_one: bool
+
+    def __init__(self, label: TextInput, *, is_one: bool = False) -> None:
+        self.is_one = is_one
+        super().__init__(label)
+
+    def __init_from_expr__(self):
+        self.is_one = False
+        super().__init_from_expr__()
+
+    def __is_one__(self) -> bool:
+        return self.is_one
 
 
 # @dataclass(frozen=True)

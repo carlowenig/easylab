@@ -3,6 +3,7 @@ from typing import Any, Callable, Generic, Literal, Optional, TypeVar, Union, ca
 from typing_extensions import TypeGuard
 
 from ..util import Comparable
+from ..lang import Text, lang, text, HasText
 from . import var as m_var
 
 _T = TypeVar("_T")
@@ -27,7 +28,7 @@ def is_constraint_input(input: Any) -> TypeGuard[ConstraintInput]:
     )
 
 
-class Constraint(ABC, Generic[_T]):
+class Constraint(Generic[_T], HasText):
     var: "m_var.Var[_T]"
 
     def __init__(self, var: "m_var.Var[_T]"):
@@ -67,6 +68,11 @@ class Constraint(ABC, Generic[_T]):
         pass
 
     @property
+    @abstractmethod
+    def text(self) -> Text:
+        pass
+
+    @property
     def value(self) -> Optional[_T]:
         pass
 
@@ -89,11 +95,9 @@ class AnyConstraint(Constraint[_T]):
     def __hash__(self) -> int:
         return hash(self.var)
 
-    def __str__(self) -> str:
-        return f"any {self.var}"
-
-    def __repr__(self):
-        return f"AnyConstraint({self.var})"
+    @property
+    def text(self) -> Text:
+        return Text(f"any {self.var}", repr=f"AnyConstraint({self.var})")
 
 
 class EqualConstraint(Constraint[_T]):
@@ -125,11 +129,12 @@ class EqualConstraint(Constraint[_T]):
     def __hash__(self) -> int:
         return hash((self.var, self._value))
 
-    def __str__(self) -> str:
-        return f"{self.var} = {self._value}"
-
-    def __repr__(self) -> str:
-        return f"EqualConstraint({self.var}, {self._value})"
+    @property
+    def text(self) -> Text:
+        return Text(
+            f"{self.var} = {self._value}",
+            repr=f"EqualConstraint({self.var}, {self._value})",
+        )
 
 
 class BoundsConstraint(Constraint[_C]):
@@ -220,22 +225,24 @@ class BoundsConstraint(Constraint[_C]):
     def __hash__(self) -> int:
         return hash((self.var, self.min, self.max, self.include_min, self.include_max))
 
-    def __str__(self) -> str:
+    @property
+    def text(self) -> Text:
         if self.min is None and self.max is None:
-            return f"any {self.var}"
+            t = "any" + lang.space + self.var.text
         elif self.min is None:
-            symbol = "<=" if self.include_max else "<"
-            return f"{self.var} {symbol} {self.max}"
+            symbol = lang.leq if self.include_max else lang.lt
+            t = self.var.text + symbol + text(self.max)
         elif self.max is None:
-            symbol = ">=" if self.include_min else "<"
-            return f"{self.var} >= {self.min}"
+            symbol = lang.geq if self.include_min else lang.gt
+            t = self.var.text + symbol + text(self.min)
         else:
-            symbol1 = "<=" if self.include_min else "<"
-            symbol2 = "<=" if self.include_max else "<"
-            return f"{self.min} {symbol1} {self.var} {symbol2} {self.max}"
+            symbol1 = lang.leq if self.include_min else lang.lt
+            symbol2 = lang.leq if self.include_max else lang.lt
+            t = text(self.min) + symbol1 + self.var.text + symbol2 + text(self.max)
 
-    def __repr__(self) -> str:
-        return f"BoundsConstraint({self.var}, {self.min}, {self.max}, {self.include_min}, {self.include_max})"
+        return t.extend(
+            repr=f"BoundsConstraint({self.var}, {self.min}, {self.max}, {self.include_min}, {self.include_max})"
+        )
 
 
 class AndConstraint(Constraint[_T]):
@@ -269,11 +276,13 @@ class AndConstraint(Constraint[_T]):
     def includes(self, other: Constraint[_T]) -> bool:
         return all(c.includes(other) for c in self.constraints)
 
-    def __str__(self) -> str:
-        return " and ".join(str(c) for c in self.constraints)
-
-    def __repr__(self) -> str:
-        return f"AndConstraint({self.var}, {self.constraints})"
+    @property
+    def text(self) -> Text:
+        return (
+            Text(" and ", latex=" \\wedge ")
+            .join(c.text for c in self.constraints)
+            .extend(repr=f"AndConstraint({self.var}, {self.constraints})")
+        )
 
 
 class OrConstraint(Constraint[_T]):
@@ -307,11 +316,13 @@ class OrConstraint(Constraint[_T]):
     def includes(self, other: Constraint[_T]) -> bool:
         return any(c.includes(other) for c in self.constraints)
 
-    def __str__(self) -> str:
-        return " or ".join(str(c) for c in self.constraints)
-
-    def __repr__(self) -> str:
-        return f"OrConstraint({self.var}, {self.constraints})"
+    @property
+    def text(self) -> Text:
+        return (
+            Text(" or ", latex=" \\vee ")
+            .join(c.text for c in self.constraints)
+            .extend(repr=f"OrConstraint({self.var}, {self.constraints})")
+        )
 
 
 class CustomConstraint(Constraint[_T]):
@@ -326,8 +337,6 @@ class CustomConstraint(Constraint[_T]):
     def includes(self, other: Constraint[_T]) -> bool:
         return self._includes(other)
 
-    def __str__(self) -> str:
-        return f"CustomConstraint({self.var}, {self._includes.__name__})"
-
-    def __repr__(self) -> str:
-        return f"CustomConstraint({self.var}, {self._includes.__name__})"
+    @property
+    def text(self) -> Text:
+        return Text(f"CustomConstraint({self.var}, {self._includes.__name__})")

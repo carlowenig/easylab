@@ -18,13 +18,14 @@ from typing import (
 )
 from typing_extensions import Self
 from matplotlib import pyplot as plt
+from matplotlib.axes import Axes
 import pandas as pd
 from IPython.display import display
 
-from ..util import AutoNamed
-from ..util import Comparable, all_fulfill_type_guard
+
+from ..util import Comparable, all_fulfill_type_guard, list_unique, AutoNamed
 from ..plot import plot
-from ..lang import lang
+from ..lang import lang, Text, TextInput
 from .var import Var
 from .constraint import (
     AndConstraint,
@@ -136,6 +137,13 @@ class DataEntry:
     def __getitem__(self, var: Var[_T]) -> Constraint[_T]:
         return self.constraint(var)
 
+    def __getattr__(self, name: str) -> Constraint:
+        for constraint in self._constraints:
+            if constraint.var.name == name:
+                return constraint
+
+        raise AttributeError(f"DataEntry has no var named '{name}'.")
+
     def value(self, var: Var[_T]) -> Optional[_T]:
         if var not in self._vars and var.is_computed:
             return var.eval(*(self.value(cast(Var, d)) for d in var.dependencies))
@@ -165,6 +173,9 @@ class DataEntry:
 
         return DataEntry(*(self.constraints + other.constraints))
 
+    def vars_text(self, *, separator: TextInput = ", "):
+        return Text.parse(separator).join(c.text for c in self._constraints)
+
     def vars_str(self, *, separator: str = ", ") -> str:
         return separator.join(str(c) for c in self._constraints)
 
@@ -189,7 +200,7 @@ class AbstractData(ABC):
         pass
 
     @abstractmethod
-    def update(self, f: Callable[[DataEntry], DataEntry]) -> Self:
+    def update(self, f: Callable[[DataEntry], DataEntryInput]) -> Self:
         pass
 
     @abstractmethod
@@ -235,9 +246,9 @@ class AbstractData(ABC):
         self,
         dataframe: pd.DataFrame,
         vars: Union[dict[Any, Var], Iterable[Var]],
-        transform: Optional[Callable[[DataEntry], DataEntry]] = None,
+        transform: Optional[Callable[[DataEntry], DataEntryInput]] = None,
     ):
-        entries = []
+        entries: list[DataEntryInput] = []
         for _, row in dataframe.iterrows():
             entry = {}
             if isinstance(vars, dict):
@@ -256,7 +267,7 @@ class AbstractData(ABC):
         self,
         path_glob: str,
         vars: Union[dict[Any, Var], Iterable[Var]],
-        transform: Optional[Callable[[DataEntry, str], DataEntry]] = None,
+        transform: Optional[Callable[[DataEntry, str], DataEntryInput]] = None,
         **kwargs,
     ):
         default_kwargs = dict(
@@ -373,14 +384,17 @@ class AbstractData(ABC):
 
     __getitem__ = select
 
-    def group_by(self, *vars: Var) -> tuple["AbstractData"]:
+    def _get_grouped_data_items(self, *vars: Var) -> tuple["SelectedData", ...]:
         if len(vars) == 0:
-            return (self,)
+            return (SelectedData(self, {}),)
 
         if len(vars) > 1:
             return sum(
-                (g.group_by(*vars[1:]) for g in self.group_by(vars[0])),
-                cast(tuple["AbstractData"], ()),
+                (
+                    g._get_grouped_data_items(*vars[1:])
+                    for g in self._get_grouped_data_items(vars[0])
+                ),
+                cast(tuple["SelectedData"], ()),
             )
 
         var = vars[0]
@@ -391,6 +405,9 @@ class AbstractData(ABC):
 
         return tuple(self.select(constraint) for constraint in set(constraints))
         # return DataCollection(*(self.select({var: value}) for value in set(values)))
+
+    def group_by(self, *vars: Var) -> "GroupedData":
+        return GroupedData(*self._get_grouped_data_items(*vars))
 
     @property
     def constants(self):
@@ -410,7 +427,7 @@ class AbstractData(ABC):
     def __or__(self, condition_entry: DataEntryInput):
         return self.select(condition_entry)
 
-    def graph(self, x: "Var[_X]", y: "Var[_Y]") -> "GraphData[_X, _Y]":
+    def graph(self, x: "Var[_X]", y: "Var[_Y]") -> "GraphData[Self, _X, _Y]":
         return GraphData(self, x, y)
 
     @property
@@ -476,6 +493,7 @@ class AbstractData(ABC):
         for var, values in self.values_dict.items():
             if unit_on_top and isinstance(var, ValueVar):
                 var = var.remove_unit()
+                values = [v.remove_unit() for v in values]
 
             key = var.label.string(text_target) if text_target is not None else var.name
 
@@ -515,9 +533,11 @@ class Data(AbstractData, AutoNamed):
     _name: Optional[str] = None
     _entries: list[DataEntry]
 
-    def __init__(self, name: Optional[str] = None, entries: Iterable[DataEntry] = ()):
+    def __init__(
+        self, name: Optional[str] = None, entries: Iterable[DataEntryInput] = ()
+    ):
         self.__init_auto_named__(name)
-        self._entries = list(entries)
+        self._entries = [DataEntry.parse(entry) for entry in entries]
 
     @property
     def name(self) -> str:
@@ -531,8 +551,8 @@ class Data(AbstractData, AutoNamed):
         self._entries.extend(DataEntry.parse(entry) for entry in entries)
         return self
 
-    def update(self, f: Callable[[DataEntry], DataEntry]) -> Self:
-        self._entries = [f(entry) for entry in self._entries]
+    def update(self, f: Callable[[DataEntry], DataEntryInput]) -> Self:
+        self._entries = [DataEntry.parse(f(entry)) for entry in self._entries]
         return self
 
     def remove_where(self, condition: Callable[[DataEntry], bool]) -> Self:
@@ -547,10 +567,13 @@ class Data(AbstractData, AutoNamed):
         return Data(self._name, self._entries)
 
 
-class ForwardingData(AbstractData):
-    inner: AbstractData
+_D = TypeVar("_D", bound=AbstractData)
 
-    def __init__(self, inner: AbstractData):
+
+class ForwardingData(AbstractData, Generic[_D]):
+    inner: _D
+
+    def __init__(self, inner: _D):
         self.inner = inner
 
     @property
@@ -561,11 +584,11 @@ class ForwardingData(AbstractData):
     def entries(self) -> Iterable[DataEntry]:
         return self.inner.entries
 
-    def add(self, *entries: DataEntryInput):
+    def add(self, *entries: DataEntryInput) -> Self:
         self.inner.add(*entries)
         return self
 
-    def update(self, f: Callable[[DataEntry], DataEntry]) -> Self:
+    def update(self, f: Callable[[DataEntry], DataEntryInput]) -> Self:
         self.inner.update(f)
         return self
 
@@ -577,18 +600,18 @@ class ForwardingData(AbstractData):
         self.inner.clear()
         return self
 
-    def copy(self):
-        return ForwardingData(self.inner.copy())
-
     @property
     def hidden_vars(self) -> Set[Var]:
         return self.inner.hidden_vars
 
 
-class ConditionalData(ForwardingData):
+class ConditionalData(ForwardingData[_D]):
     @abstractmethod
-    def __contains__(self, entry: DataEntry) -> bool:
+    def condition(self, entry: DataEntry) -> bool:
         pass
+
+    def __contains__(self, entry: DataEntryInput) -> bool:
+        return self.condition(DataEntry.parse(entry))
 
     @property
     def entries(self) -> Iterable[DataEntry]:
@@ -596,7 +619,7 @@ class ConditionalData(ForwardingData):
             if entry in self:
                 yield entry
 
-    def update(self, f: Callable[[DataEntry], DataEntry]) -> Self:
+    def update(self, f: Callable[[DataEntry], DataEntryInput]) -> Self:
         self.inner.update(lambda entry: f(entry) if entry in self else entry)
         return self
 
@@ -605,10 +628,10 @@ class ConditionalData(ForwardingData):
         return self
 
 
-class SelectedData(ConditionalData):
+class SelectedData(ConditionalData[_D]):
     selection: DataEntry
 
-    def __init__(self, inner: AbstractData, selection: DataEntryInput):
+    def __init__(self, inner: _D, selection: DataEntryInput):
         self.selection = DataEntry.parse(selection)
         super().__init__(inner)
 
@@ -616,7 +639,7 @@ class SelectedData(ConditionalData):
     def name(self) -> str:
         return f"{self.inner.name}[{self.selection.vars_str()}]"
 
-    def __contains__(self, entry: DataEntry):
+    def condition(self, entry: DataEntry):
         return all(
             c.var not in entry or c.includes(entry.constraint(c.var))
             for c in self.selection.constraints
@@ -634,16 +657,16 @@ _X = TypeVar("_X")
 _Y = TypeVar("_Y")
 
 
-class GraphData(ConditionalData, Generic[_X, _Y]):
+class GraphData(ConditionalData[_D], Generic[_D, _X, _Y]):
     x: Var[_X]
     y: Var[_Y]
 
-    def __init__(self, inner: AbstractData, x: Var[_X], y: Var[_Y]):
+    def __init__(self, inner: _D, x: Var[_X], y: Var[_Y]):
         super().__init__(inner)
         self.x = x
         self.y = y
 
-    def __contains__(self, entry: DataEntry) -> bool:
+    def condition(self, entry: DataEntry) -> bool:
         x_val = entry.value(self.x)
         y_val = entry.value(self.y)
         return x_val is not None and y_val is not None
@@ -661,52 +684,24 @@ class GraphData(ConditionalData, Generic[_X, _Y]):
                 yield (x_val, y_val)
 
     def plot(
-        self, *args, axes: Optional[plt.Axes] = None, method: str = "plot", **kwargs
+        self,
+        *args,
+        ax: Optional[plt.Axes] = None,
+        method: str = "plot",
+        **kwargs,
     ):
-        param_vars = self.vars - self.constants.vars - {self.x, self.y}
-        # Filter out variables, that depend on x or y
-        param_vars = {
-            var
-            for var in param_vars
-            if not (self.x in var.dependencies or self.y in var.dependencies)
-        }
-        grouped_data = self.inner.group_by(*param_vars)
+        return plot(
+            self.x,
+            self.y,
+            self.value_pairs,
+            *args,
+            ax=ax,
+            method=method,
+            **kwargs,
+        )
 
-        results = []
-
-        for data in grouped_data:
-            if data.is_empty:
-                continue
-
-            label = None
-            for var in param_vars:
-                if label is None:
-                    label = ""
-                else:
-                    label += "," + lang.space
-                label += var.text + " = " + var.format(data.value(var))
-
-            value_pairs = []
-
-            for entry in data.entries:
-                x_val = entry.value(self.x)
-                y_val = entry.value(self.y)
-                if x_val is not None and y_val is not None:
-                    value_pairs.append((x_val, y_val))
-
-            results.append(
-                plot(
-                    self.x,
-                    self.y,
-                    value_pairs,
-                    *args,
-                    axes=axes,
-                    method=method,
-                    label=label,
-                    **kwargs,
-                )
-            )
-        return results
+    def copy(self) -> Self:
+        return GraphData(self.inner.copy(), self.x, self.y)
 
     def __str__(self) -> str:
         return f"GraphData({self.inner.name}, {self.x}, {self.y})"
@@ -715,35 +710,107 @@ class GraphData(ConditionalData, Generic[_X, _Y]):
         return f"GraphData({self.inner.name}, {self.x}, {self.y})"
 
 
-# class DataCollection:
-#     _data_tuple: tuple[AbstractData]
+def swap_nested_forwarding_data(data: ForwardingData[ForwardingData]):
+    copy = data.copy()
+    deep_inner = copy.inner.inner
 
-#     def __init__(self, *data_tuple: AbstractData):
-#         self._data_tuple = data_tuple
+    result = copy.inner
+    result.inner = copy
+    copy.inner = deep_inner
+    return result
 
-#     def graph(self, x: "Var", y: "Var"):
-#         return DataCollection(*(d.graph(x, y) for d in self))
 
-#     def plot(
-#         self,
-#         *args,
-#         axes: Optional[Union[plt.Axes, Callable[[AbstractData], plt.Axes]]] = None,
-#         method: Union[str, Callable[[AbstractData], str]] = "plot",
-#         **kwargs,
-#     ):
-#         for data in self:
-#             if isinstance(data, GraphData):
-#                 args = (arg(data) if callable(arg) else arg for arg in args)
-#                 kwargs = {k: v(data) if callable(v) else v for k, v in kwargs.items()}
-#                 axes = axes(data) if callable(axes) else axes  # type: ignore
-#                 method = method(data) if callable(method) else method  # type: ignore
-#                 data.plot(*args, axes=axes, method=method, **kwargs)
+class GroupedData(AbstractData, Generic[_D]):
+    items: list[SelectedData[_D]]
 
-#     def __iter__(self):
-#         return iter(self._data_tuple)
+    def __init__(self, *items: SelectedData[_D]):
+        self.items = list(items)
 
-#     def __str__(self) -> str:
-#         return f"DataCollection{self._data_tuple}"
+    @property
+    def name(self) -> str:
+        return "Group(" + ", ".join(group.name for group in self.items) + ")"
 
-#     def __repr__(self) -> str:
-#         return f"DataCollection{self._data_tuple}"
+    @property
+    def entries(self) -> Iterable[DataEntry]:
+        for item in self.items:
+            yield from item.entries
+
+    def add(self, *entries: DataEntryInput):
+        for entry in entries:
+            for item in self.items:
+                if entry in item:
+                    item.add(entry)
+                    break
+        return self
+
+    def update(self, f: Callable[[DataEntry], DataEntryInput]) -> Self:
+        for item in self.items:
+            item.update(f)
+        return self
+
+    def remove_where(self, condition: Callable[[DataEntry], bool]) -> Self:
+        for item in self.items:
+            item.remove_where(condition)
+        return self
+
+    def clear(self) -> Self:
+        for item in self.items:
+            item.clear()
+        return self
+
+    def copy(self):
+        return GroupedData(*(item.copy() for item in self.items))
+
+    def plot(
+        self,
+        method: str = "plot",
+        subplots_kw: dict = {},
+        **kwargs,
+    ):
+        """
+        Creates a plot for the contained graphs.
+
+        The plot will be created by the following rules:
+        - For each x variable, a separate figure will be created.
+        - For each y variable connected to the same x variable, a subplot sharing the same x axis will be created.
+        - For each graph with the same x and y variables, a line will be created.
+        """
+
+        # Swap items from SelectedData[GraphData] to GraphData[SelectedData], to make them easier to handle
+        graphs = [
+            cast(
+                GraphData[SelectedData, Any, Any],
+                swap_nested_forwarding_data(cast(SelectedData[ForwardingData], item)),
+            )
+            for item in self.items
+            if isinstance(item.inner, GraphData)
+        ]
+
+        x_graphs: dict[Var, dict[Var, list[GraphData[SelectedData, Any, Any]]]] = {}
+
+        for graph in graphs:
+            if graph.x not in x_graphs:
+                x_graphs[graph.x] = {}
+            y_graphs = x_graphs[graph.x]
+
+            if graph.y not in y_graphs:
+                y_graphs[graph.y] = []
+
+            y_graphs[graph.y].append(graph)
+
+        figures = []
+
+        for x, y_graphs in x_graphs.items():
+            fig, ax_or_axs = plt.subplots(len(y_graphs), 1, sharex=True, **subplots_kw)
+            axs = [ax_or_axs] if isinstance(ax_or_axs, plt.Axes) else ax_or_axs
+
+            for (y, graphs), ax in zip(y_graphs.items(), axs):
+                for graph in graphs:
+                    graph_kwargs = kwargs | dict(
+                        label=graph.inner.selection.vars_text()
+                    )
+                    graph.plot(ax=ax, method=method, **graph_kwargs)
+
+            figures.append(fig)
+
+        return figures

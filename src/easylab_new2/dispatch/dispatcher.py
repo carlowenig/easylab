@@ -3,6 +3,8 @@ import operator
 import time
 from typing import Any, Callable, Generic, Iterable, TypeVar, cast, overload
 
+from ..util import format_args
+
 T = TypeVar("T")
 
 
@@ -124,13 +126,6 @@ class NoHandlerFoundException(Exception):
             if len(self.stop_reasons) > 0
             else " none"
         )
-
-
-def format_args(*args, **kwargs):
-    return ", ".join(
-        [repr(arg) for arg in args]
-        + [f"{key}={value!r}" for key, value in kwargs.items()]
-    )
 
 
 class DispatcherMiddleware:

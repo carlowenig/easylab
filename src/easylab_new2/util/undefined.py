@@ -1,6 +1,3 @@
-from typing import TypeGuard
-
-
 class Undefined:
     __instance = None
 

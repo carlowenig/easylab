@@ -15,11 +15,12 @@ from typing import (
     overload,
 )
 
-from ..lang import Text
+from ..lang import Text, lang
 from ..util import undefined, Undefined, Wildcard, is_wildcard
 
 from . import record
-from .var_type import VarType, VarTypeLike
+from .var_type import VarType, VarTypeLike, is_var_type_like
+from .metadata import Metadata, MetadataLike
 
 T = TypeVar("T")
 
@@ -59,14 +60,45 @@ def get_neutral(type_: type[T]) -> T:
         raise TypeError(f"Cannot get neutral element for type {type_!r}.")
 
 
+def interpret_var_label(
+    label: Any,
+    math: bool = True,
+    smart_subscript: bool = True,
+    smart_superscript: bool = True,
+) -> Text:
+    if isinstance(label, Text):
+        return label
+    else:
+        text = Text(label)
+
+        if smart_subscript and "_" in text.ascii:
+            parts = text.ascii.split("_")
+            text = Text(parts[0])
+            for subscript in parts[1:]:
+                text = text.subscript(subscript)
+
+        if smart_superscript and "^" in text.ascii:
+            parts = text.ascii.split("^")
+            text = Text(parts[0])
+            for superscript in parts[1:]:
+                text = text.superscript(superscript)
+
+        if math:
+            text = lang.math(text)
+
+        return text
+
+
 class Var(Generic[T]):
     def __init__(
         self,
         label: Any,
         type_: VarTypeLike[T] = object,
+        metadata: MetadataLike = None,
     ) -> None:
-        self._label = Text.interpret(label)
+        self._label = interpret_var_label(label)
         self._type = VarType.interpret(type_)
+        self.metadata = Metadata.interpret(metadata)
 
     @property
     def label(self) -> Text:
@@ -75,6 +107,7 @@ class Var(Generic[T]):
     @label.setter
     def label(self, label: Any) -> None:
         self._label = Text.interpret(label)
+        self.metadata.update()
 
     @property
     def type(self) -> VarType[T]:
@@ -83,6 +116,7 @@ class Var(Generic[T]):
     @type.setter
     def type(self, type_: VarTypeLike[T]) -> None:
         self._type = VarType.interpret(type_)
+        self.metadata.update()
 
     def default(self) -> T | Undefined:
         return self.type.default()
@@ -91,7 +125,7 @@ class Var(Generic[T]):
         return self.default() is not undefined
 
     def __repr__(self) -> str:
-        return f"{type(self).__name__}(label={self.label!r}, type={self.type!r})"
+        return f"{type(self).__name__}(label={self.label!r}, type={self.type!r}, metadata={self.metadata!r})"
 
     def __str__(self) -> str:
         return self.label.ascii
@@ -118,6 +152,24 @@ class Var(Generic[T]):
         if check:
             self.type.check(result)
         return result
+
+    def compute_by(
+        self,
+        params: tuple[Var, ...],
+        func: Callable[..., Any] | str,
+    ) -> Callable[..., T]:
+        return self.type.compute_by(params, func)
+
+    def get_plot_value(
+        self, value: Any, *, parse: bool = True, check: bool = True
+    ) -> Any:
+        if parse:
+            value = self.type.parse(value)
+
+        if check:
+            self.type.check(value)
+
+        return self.type.get_plot_value(value)
 
     @overload
     def equal(self, a: Any, b: Any, *, check: bool = True) -> bool:
@@ -158,28 +210,70 @@ class Var(Generic[T]):
         return RecordEntry(self, self.parse(value))
 
     def matches(self, query: VarQuery) -> bool:
-        return is_wildcard(query) or query is self or self.label.matches(query)
+        if is_wildcard(query) or query is self:
+            return True
 
-    def __eq__(self, other: Any) -> VarCondition:
-        return VarCondition.for_other(self, other, lambda x, y: x == y)
+        if isinstance(query, str):
+            if self.label.matches(query):
+                return True
 
-    def __ne__(self, other: Any) -> VarCondition:
-        return VarCondition.for_other(self, other, lambda x, y: x != y)
+            if ":" in query:
+                key, value = query.split(":", 1)
+                key = key.strip()
+                value = value.strip()
+                if key == "label":
+                    return self.label.matches(value)
+                if key == "type":
+                    return self.type.matches(value)
+                if key == "metadata":
+                    return self.metadata.matches(value)
 
-    def __lt__(self, other: Any) -> VarCondition:
-        return VarCondition.for_other(self, other, lambda x, y: x < y)
+            return False
 
-    def __le__(self, other: Any) -> VarCondition:
-        return VarCondition.for_other(self, other, lambda x, y: x <= y)
+        if isinstance(query, dict):
+            if "label" in query and not self.label.matches(query["label"]):
+                return False
+            if "type" in query and not self.type.matches(query["type"]):
+                return False
+            if "metadata" in query and not self.metadata.matches(query["metadata"]):
+                return False
 
-    def __gt__(self, other: Any) -> VarCondition:
-        return VarCondition.for_other(self, other, lambda x, y: x > y)
+            metadata_dict = {
+                key.removeprefix("metadata."): value
+                for key, value in query.items()
+                if key.startswith("metadata.")
+            }
+            if metadata_dict and not self.metadata.matches(metadata_dict):
+                return False
 
-    def __ge__(self, other: Any) -> VarCondition:
-        return VarCondition.for_other(self, other, lambda x, y: x >= y)
+            return True
 
-    def __contains__(self, other: Any) -> VarCondition:
-        return VarCondition.for_other(self, other, lambda x, y: y in x)
+        if isinstance(query, Var):
+            return self.label.matches(query.label)
+
+        return False
+        # raise TypeError(f"Cannot match var {self} by query of type {type(query).__name__}.")
+
+    def __eq__(self, other: Any) -> RecordEntryCondition:
+        return RecordEntryCondition.for_other(self, other, lambda x, y: x == y)
+
+    def __ne__(self, other: Any) -> RecordEntryCondition:
+        return RecordEntryCondition.for_other(self, other, lambda x, y: x != y)
+
+    def __lt__(self, other: Any) -> RecordEntryCondition:
+        return RecordEntryCondition.for_other(self, other, lambda x, y: x < y)
+
+    def __le__(self, other: Any) -> RecordEntryCondition:
+        return RecordEntryCondition.for_other(self, other, lambda x, y: x <= y)
+
+    def __gt__(self, other: Any) -> RecordEntryCondition:
+        return RecordEntryCondition.for_other(self, other, lambda x, y: x > y)
+
+    def __ge__(self, other: Any) -> RecordEntryCondition:
+        return RecordEntryCondition.for_other(self, other, lambda x, y: x >= y)
+
+    def __contains__(self, other: Any) -> RecordEntryCondition:
+        return RecordEntryCondition.for_other(self, other, lambda x, y: y in x)
 
     def __hash__(self):
         return id(self)
@@ -191,15 +285,15 @@ class Var(Generic[T]):
 VarQuery = Union[Var[T], Wildcard, Any]
 
 
-class VarCondition:
+class RecordEntryCondition:
     @staticmethod
     def for_other(
         var: Var, other: Any, check: Callable[[Any, Any], bool]
-    ) -> VarCondition:
+    ) -> RecordEntryCondition:
         if isinstance(other, Var):
-            return VarCondition([var, other], lambda x, y: check(x, y))
+            return RecordEntryCondition([var, other], lambda x, y: check(x, y))
         else:
-            return VarCondition([var], lambda x: check(x, other))
+            return RecordEntryCondition([var], lambda x: check(x, other))
 
     def __init__(self, vars: Iterable[Var[Any]], check: Callable[..., bool]) -> None:
         self.vars = list(vars)
@@ -211,22 +305,22 @@ class VarCondition:
                     f"First argument of VarCondition must be a list of Var objects. Found element of type {type(var).__name__}."
                 )
 
-    def __and__(self, other: VarCondition):
+    def __and__(self, other: RecordEntryCondition):
         n_vars = len(self.vars)
-        return VarCondition(
+        return RecordEntryCondition(
             self.vars + other.vars,
             lambda *args: self.check(*args[:n_vars]) and other.check(*args[n_vars:]),
         )
 
-    def __or__(self, other: VarCondition):
+    def __or__(self, other: RecordEntryCondition):
         n_vars = len(self.vars)
-        return VarCondition(
+        return RecordEntryCondition(
             self.vars + other.vars,
             lambda *args: self.check(*args[:n_vars]) or other.check(*args[n_vars:]),
         )
 
     def __invert__(self):
-        return VarCondition(self.vars, lambda *args: not self.check(*args))
+        return RecordEntryCondition(self.vars, lambda *args: not self.check(*args))
 
 
 class DerivedVar(Var[T], ABC):
@@ -234,69 +328,85 @@ class DerivedVar(Var[T], ABC):
     def get_value(self, record: "record.Record") -> T:
         ...
 
+    @abstractmethod
+    def get_dependencies(self) -> Iterable[Var]:
+        ...
+
 
 class Const(DerivedVar[T]):
-    def __init__(self, label: Any, value: T, type_: type[T] | None = None) -> None:
-        if type_ is None:
-            type_ = type(value)
-        elif not isinstance(value, type_):
-            raise TypeError(f"Value {value!r} is not of specified type {type_!r}.")
+    def __init__(
+        self, label: Any, value: T | Any, type_: VarTypeLike[T] | None = None
+    ) -> None:
+        super().__init__(label, type_ if type_ is not None else type(value))
 
-        self.value = value
+        self._value = self.parse(value)
 
-        super().__init__(label, type_)
+    @property
+    def value(self) -> T:
+        return self._value
+
+    @value.setter
+    def value(self, value: Any) -> None:
+        self._value = self.parse(value)
+        self.metadata.update()
 
     def get_value(self, record: "record.Record") -> T:
-        return self.value
+        return self._value
+
+    def get_dependencies(self) -> Iterable[Var]:
+        return []
 
 
 def infer_return_type(
-    f: Callable[..., T], param_types: list[type] | None = None
+    f: Callable[..., T] | str, param_types: list[type] | None = None
 ) -> type[T]:
-    sig = inspect.signature(f, eval_str=True)
-
-    if (
-        isinstance(sig.return_annotation, type)
-        and sig.return_annotation is not sig.empty
-    ):
-        return cast(type[T], sig.return_annotation)
-
-    if param_types is None:
-        param_types = []
-
-        for param in sig.parameters.values():
-            if param.annotation is not param.empty and isinstance(
-                param.annotation, type
-            ):
-                param_types.append(param.annotation)
-            elif param.default is not param.empty:
-                param_types.append(type(param.default))
-            else:
-                param_types = None
-                break
-
     fail_reason = None
 
-    if param_types is not None:
-        test_args = []
-        test_args_available = True
+    if callable(f):
+        sig = inspect.signature(f)  # , eval_str=True)
 
-        for param_type in param_types:
-            try:
-                test_args.append(get_neutral(param_type))
-            except TypeError:
-                try:
-                    test_args.append(param_type())
-                except:
-                    test_args_available = False
-                    fail_reason = f"Could not create test argument for type {param_type.__name__}."
+        if (
+            isinstance(sig.return_annotation, type)
+            and sig.return_annotation is not sig.empty
+        ):
+            return cast(type[T], sig.return_annotation)
+
+        if param_types is None:
+            param_types = []
+
+            for param in sig.parameters.values():
+                if param.annotation is not param.empty and isinstance(
+                    param.annotation, type
+                ):
+                    param_types.append(param.annotation)
+                elif param.default is not param.empty:
+                    param_types.append(type(param.default))
+                else:
+                    param_types = None
                     break
 
-        if test_args_available:
-            try:
-                return type(f(*test_args))
-            except Exception as e:
-                fail_reason = e
+        if param_types is not None:
+            test_args = []
+            test_args_available = True
+
+            for param_type in param_types:
+                try:
+                    test_args.append(get_neutral(param_type))
+                except TypeError:
+                    try:
+                        test_args.append(param_type())
+                    except:
+                        test_args_available = False
+                        fail_reason = f"Could not create test argument for type {param_type.__name__}."
+                        break
+
+            if test_args_available:
+                try:
+                    return type(f(*test_args))
+                except Exception as e:
+                    fail_reason = e
+    else:
+        fail_reason = "Object is not callable."
 
     raise TypeError(
         f"Cannot infer return type of {f!r}. Please specify it explicitly."
@@ -304,59 +414,25 @@ def infer_return_type(
     )
 
 
-def sanitize_arg_name(name: str):
-    s = "".join(
-        c if c.isalnum() else "_" for c in name.replace(" ", "_").replace("-", "_")
-    )
-
-    if s[0].isdigit():
-        s = "_" + s
-
-    if keyword.iskeyword(s):
-        s += "_"
-
-    if not s.isidentifier():
-        raise ValueError(f"Invalid argument name {name!r}.")
-
-    return s
-
-
 class Computed(DerivedVar[T]):
     def __init__(
         self,
         label: Any,
         params: Iterable[Var],
-        compute: Callable[..., Any] | str | type[T] | None = None,
-        type_: type[T] | None = None,
+        func: Callable[..., Any] | str,
+        type_: VarTypeLike[T] | None = None,
     ) -> None:
-        if isinstance(compute, type):
-            type_ = cast(type[T], compute)
-            compute = None
-
-        if compute is None:
-            compute = Text.interpret(label).ascii
-
-        if isinstance(compute, str):
-            compute = cast(
-                Callable[..., Any],
-                eval(
-                    f"lambda {', '.join(sanitize_arg_name(param.label.ascii) for param in params)}: {compute}",
-                ),
-            )
-
-        assert callable(compute)
+        self._params = tuple(params)
 
         if type_ is None:
-            type_ = infer_return_type(
-                compute, [param.type.value_type for param in params]
-            )
+            type_ = infer_return_type(func, [param.type.value_type for param in params])
 
-        assert isinstance(type_, type)
-
-        self._params = tuple(params)
-        self.compute = compute
+        type_ = VarType.interpret(cast(VarTypeLike, type_))
 
         super().__init__(label, type_)
+
+        self._func = func
+        self._compute = self.compute_by(self._params, func)
 
     @property
     def params(self) -> tuple[Var, ...]:
@@ -365,6 +441,34 @@ class Computed(DerivedVar[T]):
     @params.setter
     def params(self, params: Iterable[Var]) -> None:
         self._params = tuple(params)
+
+    @property
+    def func(self):
+        return self._func
+
+    @func.setter
+    def func(self, func: Callable[..., Any] | str) -> None:
+        self._func = func
+        self._compute = self.compute_by(self._params, func)
+
+    def compute(self, *param_vals: Any, parse: bool = True, check: bool = True) -> T:
+        result = self._compute(*param_vals)
+
+        if parse:
+            result = self.parse(result, check=check)
+        elif check:
+            self.check(result)
+
+        return cast(T, result)
+
+    @property
+    def type(self) -> VarType[T]:
+        return super().type
+
+    @type.setter
+    def type(self, type_: VarTypeLike[T]) -> None:
+        super().type = type_
+        self.func = self._func  # Trigger func setter
 
     def __call__(self, *args: Any) -> T:
         if len(args) != len(self.params):
@@ -378,3 +482,6 @@ class Computed(DerivedVar[T]):
 
     def get_value(self, record: "record.Record") -> T:
         return self(*[record[param] for param in self.params])
+
+    def get_dependencies(self) -> Iterable[Var]:
+        return self.params

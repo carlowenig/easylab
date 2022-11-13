@@ -1,6 +1,7 @@
-from typing import Any, Literal, TypeGuard, Union
+from .misc import EllipsisType
+from typing import Any, Literal, Union
+from typing_extensions import TypeGuard
 
-EllipsisType = type(Ellipsis)
 
 Wildcard = Union[EllipsisType, Literal["*"]]
 

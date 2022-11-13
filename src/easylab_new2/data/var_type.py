@@ -1,9 +1,13 @@
 from __future__ import annotations
 import math
-from typing import Any, Callable, Generic, TypeVar, Union
+from typing import Any, Callable, Generic, TypeVar, Union, cast
+from typing_extensions import TypeGuard
+
+from ..util.misc import sanitize_arg_name
 from ..lang import Text
-from ..util import Undefined, undefined
+from ..util import Undefined, undefined, is_wildcard
 import inflection
+from . import var
 
 
 T = TypeVar("T")
@@ -11,13 +15,26 @@ T = TypeVar("T")
 VarTypeLike = Union["VarType[T]", type[T]]
 
 
+def is_var_type_like(value: Any) -> TypeGuard[VarTypeLike]:
+    return isinstance(value, VarType) or isinstance(value, type)
+
+
 class VarType(Generic[T]):
+    __registered_types: dict[type, VarType] = {}
+
+    @staticmethod
+    def register(type_: VarType[T]):
+        VarType.__registered_types[type_.value_type] = type_
+
     @staticmethod
     def interpret(input: VarTypeLike[T]) -> VarType[T]:
         if isinstance(input, VarType):
             return input
         elif isinstance(input, type):
-            return VarType(input)
+            if input in VarType.__registered_types:
+                return VarType.__registered_types[input]
+            else:
+                return VarType(input)
         else:
             raise TypeError(f"Cannot interpret {input} as VarType.")
 
@@ -31,15 +48,22 @@ class VarType(Generic[T]):
         parse: Callable[[Any], T] | None = None,
         equal: Callable[[T, T], bool] | None = None,
         check: Callable[[T], None] | None = None,
+        compute_by: Callable[
+            [tuple["var.Var", ...], Callable[..., Any] | str], Callable[..., T]
+        ]
+        | None = None,
+        get_plot_value: Callable[[T], float] | None = None,
         bases: list[VarType[T]] = [],
     ) -> None:
         self.value_type = value_type
-        self.name = name or inflection.underscore(value_type.__name__)
+        self.name: str = name or inflection.underscore(value_type.__name__)
         self._default = default
         self._format = format
         self._parse = parse
         self._equal = equal
         self._check = check
+        self._compute_by = compute_by
+        self._get_plot_value = get_plot_value
         self.bases = bases
 
     def default_or_raise(self) -> T:
@@ -144,6 +168,78 @@ class VarType(Generic[T]):
             raise TypeError(
                 f"Expected {self.value_type.__name__}, got {type(value).__name__}."
             )
+
+    def compute_by_or_raise(
+        self, params: tuple["var.Var", ...], func: Callable[..., Any] | str
+    ) -> Callable[..., T]:
+        # Own implementation
+        if self._compute_by is not None:
+            return self._compute_by(params, func)
+
+        # Fall back to base implementation
+        for base in self.bases:
+            try:
+                return base.compute_by(params, func)
+            except NotImplementedError:
+                pass
+
+        raise NotImplementedError
+
+    def compute_by(
+        self, params: tuple["var.Var", ...], func: Callable[..., Any] | str
+    ) -> Callable[..., T]:
+        try:
+            return self.compute_by_or_raise(params, func)
+        except NotImplementedError:
+            # Fall back to default implementation
+
+            if isinstance(func, str):
+                func = cast(
+                    Callable[..., Any],
+                    eval(
+                        f"lambda {', '.join(sanitize_arg_name(param.label.ascii) for param in params)}: {func}",
+                    ),
+                )
+
+            if not callable(func):
+                raise TypeError(f"Invalid function: {func}")
+
+            return func
+
+    def get_plot_value_or_raise(self, value: T) -> float:
+        # Own implementation
+        if self._get_plot_value is not None:
+            return self._get_plot_value(value)
+
+        # Fall back to base implementation
+        for base in self.bases:
+            try:
+                return base.get_plot_value_or_raise(value)
+            except NotImplementedError:
+                pass
+
+        raise NotImplementedError
+
+    def get_plot_value(self, value: T) -> float:
+        try:
+            return self.get_plot_value_or_raise(value)
+        except NotImplementedError:
+            try:
+                return float(value)  # type: ignore
+            except TypeError:
+                raise TypeError(f"Cannot get plot value for var type {self}.")
+
+    def matches(self, query: Any):
+        if is_wildcard(query) or query is self:
+            return True
+
+        if isinstance(query, type):
+            return issubclass(self.value_type, query)
+
+        if isinstance(query, str):
+            return self.name == query
+
+        raise ValueError(f"Cannot match VarType with {query}.")
 
 
 def decimal_var_type(prec: int | None = None):

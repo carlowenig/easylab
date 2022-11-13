@@ -14,7 +14,8 @@ from typing import (
     cast,
     overload,
 )
-from .var import DerivedVar, Var, VarQuery, VarCondition
+from .var import DerivedVar, Var, VarQuery, RecordEntryCondition
+from .metadata import Metadata, MetadataLike
 from ..lang import is_text_target, Text, lang
 from ..util import Undefined, undefined, Wildcard, is_wildcard
 
@@ -71,33 +72,11 @@ def value_matches(value: T, query: ValueQuery[T]) -> bool:
     return False
 
 
-def get_current_username():
-    try:
-        return getpass.getuser()
-    except OSError:
-        return None
-
-
-@dataclass
-class Metadata:
-    created_at: datetime = field(default_factory=datetime.now)
-    created_by: str | None = field(default_factory=get_current_username)
-    updated_at: datetime | None = None
-    updated_by: str | None = None
-    source: str | None = None
-
-    def update(self, at: datetime | None = None, by: str | None = None):
-        self.updated_at = at or datetime.now()
-        self.updated_by = by or get_current_username()
-
-    @property
-    def was_updated(self):
-        return self.updated_at is not None
-
-
 RecordEntryLike = Union["RecordEntry[T]", tuple[Var[T], T]]
 
-RecordEntryQuery = Union[VarQuery[T], tuple[VarQuery[T], ValueQuery[T]], VarCondition]
+RecordEntryQuery = Union[
+    VarQuery[T], tuple[VarQuery[T], ValueQuery[T]], RecordEntryCondition
+]
 
 
 class RecordEntry(Generic[T]):
@@ -122,7 +101,7 @@ class RecordEntry(Generic[T]):
         var: Var[T],
         value: Any,
         *,
-        metadata: Metadata | None = None,
+        metadata: MetadataLike = None,
         _parsed_value: T | Undefined = undefined,
     ) -> None:
         self._var = var
@@ -132,7 +111,7 @@ class RecordEntry(Generic[T]):
             var.parse(value) if isinstance(_parsed_value, Undefined) else _parsed_value
         )
 
-        self.metadata = metadata or Metadata()
+        self.metadata = Metadata.interpret(metadata)
 
     def get_formatted_value(self):
         return self._var.format(self._value)
@@ -183,7 +162,7 @@ class RecordEntry(Generic[T]):
             return self._var.matches(var_query) and value_matches(
                 self._value, value_query
             )
-        elif isinstance(query, VarCondition) and len(query.vars) == 1:
+        elif isinstance(query, RecordEntryCondition) and len(query.vars) == 1:
             return query.check(self._var)
         else:
             return self._var.matches(query)
@@ -243,7 +222,7 @@ class Comparison(Generic[T]):
         return hash((self.a, self.b))
 
 
-class ComparisonVar(Var[Comparison[T | Undefined]]):
+class ComparisonVar(Var[Comparison[Union[T, Undefined]]]):
     def __init__(self, var: Var[T]):
         self.var = var
         super().__init__("compare" + lang.par(var.label), Comparison)
@@ -293,12 +272,23 @@ def take_last(a, b):
     return b
 
 
-class NoRecordEntryFoundException(Exception):
+class RecordEntryNotFoundException(Exception):
     def __init__(self, query: RecordEntryQuery):
         self.query = query
 
     def __str__(self) -> str:
         return f"No record entry found for query {self.query!r}."
+
+
+class VarNotFoundException(Exception):
+    def __init__(self, query: VarQuery):
+        self.query = query
+
+    def __str__(self) -> str:
+        if isinstance(self.query, DerivedVar):
+            return f"Not all dependencies of {self.query!r} were found."
+
+        return f"No var found for query {self.query!r}."
 
 
 class Record:
@@ -334,19 +324,21 @@ class Record:
     def entries(self) -> list[RecordEntry[Any]]:
         return self._entries
 
-    def get_vars(self):
-        return [entry.var for entry in self._entries]
-
     def get_entry_or_none(self, query: RecordEntryQuery[T]) -> RecordEntry[T] | None:
         for entry in self._entries:
             if entry.matches(query):
                 return entry
 
+        if isinstance(query, DerivedVar):
+            return RecordEntry(
+                query, query.get_value(self), metadata={"source": "derived"}
+            )
+
     def get_entry(self, query: RecordEntryQuery[T]) -> RecordEntry[T]:
         entry = self.get_entry_or_none(query)
 
         if entry is None:
-            raise NoRecordEntryFoundException(query)
+            raise RecordEntryNotFoundException(query)
 
         return entry
 
@@ -377,8 +369,29 @@ class Record:
     def get_formatted_value(self, query: RecordEntryQuery[T]) -> Text:
         return self.get_entry(query).get_formatted_value()
 
+    def get_vars(self, query: RecordEntryQuery[T] = "*") -> list[Var[T]]:
+        vars = []
+        for entry in self._entries:
+            if entry.matches(query):
+                vars.append(entry.var)
+        return vars
+
+    def get_var_or_none(self, query: RecordEntryQuery[T]) -> Var[T] | None:
+        for entry in self._entries:
+            if entry.matches(query):
+                return entry.var
+
+        if isinstance(query, DerivedVar):
+            # and all(d in self for d in query.get_dependencies()):
+            return query
+
     def get_var(self, query: RecordEntryQuery[T]) -> Var[T]:
-        return self.get_entry(query).var
+        var = self.get_var_or_none(query)
+
+        if var is None:
+            raise VarNotFoundException(query)
+
+        return var
 
     def set_var(self, query: RecordEntryQuery, var: Var) -> None:
         self.get_entry(query).var = var
@@ -394,7 +407,7 @@ class Record:
             if default is not undefined:
                 return cast(T, default)
 
-        raise NoRecordEntryFoundException(query)
+        raise RecordEntryNotFoundException(query)
 
     def __setitem__(self, query: RecordEntryQuery, value: Any) -> None:
         self.set_value(query, value)
@@ -454,7 +467,7 @@ class Record:
             return all(self.matches(q) for q in query)
         elif isinstance(query, dict):
             return all(self.matches(q) for q in query.items())
-        elif isinstance(query, VarCondition):
+        elif isinstance(query, RecordEntryCondition):
             values = [self[var] for var in query.vars]
             return query.check(*values)
         else:

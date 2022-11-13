@@ -1,5 +1,6 @@
 from __future__ import annotations
-from typing import Any, Callable, Iterable, Literal, Optional, TypeGuard
+from typing import Any, Callable, Iterable, Literal, Optional
+from typing_extensions import TypeGuard
 
 
 TextTarget = Literal["ascii", "unicode", "latex"]
@@ -112,18 +113,15 @@ class Text:
             + Text(rpar, latex="}")
         )
 
-    def __getitem__(self, other: Any) -> "Text":
-        return self.subscript(other)
-
-    def __xor__(self, other: Any) -> "Text":
-        return self.superscript(other)
-
-    def transform(self, f: Callable[[str, TextTarget], str]):
+    def transform(
+        self, f: Callable[[str, TextTarget], str], only_specified_targets: bool = False
+    ):
+        if only_specified_targets:
+            targets = self.specified_targets
+        else:
+            targets = text_targets
         return Text(
-            **{
-                target: f(string, target)
-                for target, string in self._target_strings.items()
-            },
+            **{target: f(self.get(target), target) for target in targets},
         )
 
     def __call__(self, *args: Any):
@@ -274,7 +272,7 @@ class lang:
 
     # UTILITY LABELS
     latex_div = Text(latex=" ")
-    math = Text(latex=" $%$ ")
+    math = Text("%", latex=" $%$ ")
     display_math = Text(latex=" $$%$$ ")
     space = Text(" ", latex="\\: ")
     small_space = Text(" ", latex="\\, ")
@@ -292,7 +290,7 @@ class lang:
 
     # SYMBOLS
     pm = plus_minus = Text("+/-", unicode="±", latex="\\pm ")
-    cdot = Text("⋅", latex="\\cdot ")
+    cdot = Text("*", unicode="⋅", latex="\\cdot ")
     times = Text("×", latex="\\times ")
     frac = Text("%1 / %2", latex="\\frac{%1}{%2} ")
     degree = Text("deg", unicode="°", latex="^\\circ ")

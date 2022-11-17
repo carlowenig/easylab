@@ -1,10 +1,12 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
 import itertools
-from ..util import EllipsisType
+
+from ..internal_util import EllipsisType, Wildcard, undefined
 from typing import (
     Any,
     Callable,
+    Generic,
     Iterable,
     Literal,
     Sized,
@@ -22,23 +24,41 @@ from .record import (
     ValueQuery,
     RecordLike,
     VarNotFoundException,
+    is_record_like,
+    is_record_query,
 )
-from .var import Computed, DerivedVar, VarQuery, Var
-from ..lang import Text, lang
+from .var import Computed, DerivedVar, VarQuery, Var, VarTypeLike
+from ..lang import Text, lang, TextTarget
+from ..expr import Expr
 from .metadata import Metadata
-
+from tabulate import tabulate
+from typing_extensions import TypeGuard
 
 T = TypeVar("T")
+S = TypeVar("S")
 
-DataLike = Union["Data", Iterable[RecordLike]]
+DataLike = Union["Data[T]", Iterable[RecordLike[T]]]
+
+
+def is_data_like(input: Any) -> TypeGuard[DataLike]:
+    if isinstance(input, Data):
+        return True
+    if isinstance(input, Iterable):
+        first = next(iter(input), undefined)
+        return first is undefined or is_record_like(first)
+    return False
 
 
 T_Extracted = TypeVar("T_Extracted", bound=Union[None, RecordEntry, Record, "Data"])
 
 
-class Data(ABC):
+def retype_var(var: Var, label: Any, type_: type[T]) -> Var[T]:
+    return Var(Text.interpret(label) + lang.par(var.label), type_)
+
+
+class Data(ABC, Generic[T]):
     @staticmethod
-    def interpret(input: DataLike) -> Data:
+    def interpret(input: DataLike[T]) -> Data[T]:
         if isinstance(input, Data):
             return input
         elif isinstance(input, Iterable):
@@ -75,19 +95,19 @@ class Data(ABC):
         return ListData(records)
 
     @abstractmethod
-    def get_records(self) -> Iterable[Record]:
+    def get_records(self) -> Iterable[Record[T]]:
         ...
 
     @abstractmethod
-    def add_record(self, record: RecordLike) -> None:
+    def add_record(self, record: RecordLike[T]) -> None:
         ...
 
     @abstractmethod
-    def remove(self, query: RecordQuery) -> None:
+    def remove(self, query: RecordQuery[T]) -> None:
         ...
 
     @abstractmethod
-    def copy(self) -> Data:
+    def copy(self) -> Data[T]:
         ...
 
     @property
@@ -98,36 +118,36 @@ class Data(ABC):
         else:
             return sum(1 for _ in records)
 
-    def add_derived_var(self, derived_var: DerivedVar):
+    def add_derived_var(self, derived_var: DerivedVar[T]):
         for record in self.get_records():
             record.add_derived_var(derived_var)
 
-    def add(self, item: RecordLike | DerivedVar) -> None:
+    def add(self, item: RecordLike[T] | DerivedVar[T]) -> None:
         if isinstance(item, DerivedVar):
             self.add_derived_var(item)
         else:
             self.add_record(item)
 
-    def _where(self, query: RecordQuery) -> Data:
+    def _where(self, query: RecordQuery[T]) -> Data[T]:
         return WhereData(self, query)
 
     @overload
-    def where(self, query: RecordQuery, /) -> Data:
+    def where(self, query: RecordQuery[T], /) -> Data[T]:
         ...
 
     @overload
-    def where(self, var: VarQuery, value: ValueQuery, /) -> Data:
+    def where(self, var: VarQuery[T], value: ValueQuery[T], /) -> Data[T]:
         ...
 
     @overload
     def where(
-        self, arg1: RecordQuery | VarQuery, arg2: ValueQuery | None = None, /
-    ) -> Data:
+        self, arg1: RecordQuery[T] | VarQuery[T], arg2: ValueQuery[T] | None = None, /
+    ) -> Data[T]:
         ...
 
     def where(
-        self, arg1: RecordQuery | VarQuery, arg2: ValueQuery | None = None, /
-    ) -> Data:
+        self, arg1: RecordQuery[T] | VarQuery[T], arg2: ValueQuery[T] | None = None, /
+    ) -> Data[T]:
         if arg2 is None:
             query = arg1
         else:
@@ -135,8 +155,52 @@ class Data(ABC):
 
         return self._where(query)
 
-    def cache(self) -> Data:
+    def cache(self) -> Data[T]:
         return CachedData(self)
+
+    def child(self, data: DataLike) -> Data:
+        return ChildData(Data.interpret(data), parent_data=self)
+
+    def map_records(
+        self, transform_record: Callable[[Record[T]], Record[S]]
+    ) -> Data[S]:
+        return MappedData(self, transform_record)
+
+    def map_entries(
+        self,
+        query: RecordEntryQuery,
+        transform_entry: Callable[[RecordEntry], RecordEntry],
+    ):
+        return self.map_records(lambda record: record.map(query, transform_entry))
+
+    @overload
+    def pluck(self, entry_query: Wildcard, attr: str, type_: VarTypeLike[S]) -> Data[S]:
+        ...
+
+    @overload
+    def pluck(self, entry_query: RecordEntryQuery, attr: str) -> Data:
+        ...
+
+    @overload
+    def pluck(
+        self, entry_query: RecordEntryQuery, attr: str, type_: VarTypeLike | None = None
+    ) -> Data:
+        ...
+
+    def pluck(
+        self, entry_query: RecordEntryQuery, attr: str, type_: VarTypeLike | None = None
+    ):
+        return self.map_records(lambda record: record.pluck(entry_query, attr, type_))
+
+    def format(self) -> Data[Text]:
+        def format_entry_as_text(entry: RecordEntry) -> RecordEntry[Text]:
+            var = retype_var(entry.var, "formatted", Text)
+            return RecordEntry(var, entry.var.format(entry.value))
+
+        return self.map_records(lambda record: record.map(..., format_entry_as_text))
+
+    def format_for_target(self, target: TextTarget):
+        return self.format().pluck(..., target, str)
 
     def _extract(self, type_: type[T_Extracted] | None = None) -> T_Extracted:
         if self.size == 0:
@@ -158,7 +222,7 @@ class Data(ABC):
         ...
 
     @overload
-    def extract(self) -> Union[None, RecordEntry, Record, Data]:
+    def extract(self) -> Union[None, RecordEntry[T], Record[T], Data[T]]:
         ...
 
     def extract(self, type_: type[T_Extracted] | None = None) -> T_Extracted:
@@ -176,24 +240,32 @@ class Data(ABC):
     def __contains__(self, query: RecordQuery) -> bool:
         return any(record.matches(query) for record in self)
 
-    def __getitem__(self, index: SupportsIndex) -> Record:
+    def __getitem__(self, index: SupportsIndex) -> Record[T]:
         # TODO: Support slices, var queries, etc.
         return list(self.get_records())[index]
 
-    def get_entries(self, query: RecordEntryQuery[T]) -> Iterable[RecordEntry[T]]:
+    def get_entries(self, query: RecordEntryQuery[S]) -> Iterable[RecordEntry[S]]:
         for record in self.get_records():
             entry = record.get_entry_or_none(query)
             if entry is not None:
                 yield entry
 
-    def get_values(self, query: RecordEntryQuery[T]) -> Iterable[T]:
+    def get_values(self, query: RecordEntryQuery[S]) -> Iterable[S]:
         for entry in self.get_entries(query):
             yield entry.value
 
-    def get_value_list(self, query: RecordEntryQuery[T]) -> list[T]:
+    def get_value_list(self, query: RecordEntryQuery[S]) -> list[S]:
         return list(self.get_values(query))
 
-    def get_vars(self, query: RecordEntryQuery[T] = "*") -> list[Var[T]]:
+    @overload
+    def get_vars(self) -> list[Var[T]]:
+        ...
+
+    @overload
+    def get_vars(self, query: RecordEntryQuery[S]) -> list[Var[S]]:
+        ...
+
+    def get_vars(self, query: RecordEntryQuery[S] = "*") -> list[Var[S]]:
         vars = []
         for record in self.get_records():
             for var in record.get_vars(query):
@@ -203,13 +275,13 @@ class Data(ABC):
 
         return vars
 
-    def get_var_or_none(self, query: RecordEntryQuery[T]) -> Var[T] | None:
+    def get_var_or_none(self, query: RecordEntryQuery[S]) -> Var[S] | None:
         for record in self.get_records():
             var = record.get_var_or_none(query)
             if var is not None:
                 return var
 
-    def get_var(self, query: RecordEntryQuery[T]) -> Var[T]:
+    def get_var(self, query: RecordEntryQuery[S]) -> Var[S]:
         var = self.get_var_or_none(query)
         if var is None:
             raise VarNotFoundException(query)
@@ -219,7 +291,7 @@ class Data(ABC):
         return list(self.get_records())
 
     @overload
-    def to_list_of_dicts(self, keys: Literal["vars"]) -> list[dict[Var, Any]]:
+    def to_list_of_dicts(self, keys: Literal["vars"]) -> list[dict[Var[T], T]]:
         ...
 
     @overload
@@ -228,7 +300,7 @@ class Data(ABC):
         keys: Literal[
             "labels.ascii", "labels.unicode", "labels.latex"
         ] = "labels.ascii",
-    ) -> list[dict[str, Any]]:
+    ) -> list[dict[str, T]]:
         ...
 
     @overload
@@ -237,7 +309,7 @@ class Data(ABC):
         keys: Literal[
             "vars", "labels.ascii", "labels.unicode", "labels.latex"
         ] = "labels.ascii",
-    ) -> list[dict[Any, Any]]:
+    ) -> list[dict[Any, T]]:
         ...
 
     def to_list_of_dicts(
@@ -257,6 +329,14 @@ class Data(ABC):
         import pandas
 
         return pandas.DataFrame(self.to_list_of_dicts(keys=keys))
+
+    def to_record(self):
+        return Record(
+            {
+                var.wrap("collected", var.type.list()): self.get_value_list(var)
+                for var in self.get_vars()
+            }
+        )
 
     def get_records_text(
         self,
@@ -300,6 +380,14 @@ class Data(ABC):
     def __repr__(self) -> str:
         return self.text.ascii
 
+    @overload
+    def __add__(self, other: DataLike[T]) -> Data[T]:
+        ...
+
+    @overload
+    def __add__(self, other: DataLike) -> Data:
+        ...
+
     def __add__(self, other: DataLike) -> Data:
         return CombinedData(self, other)
 
@@ -338,6 +426,26 @@ class Data(ABC):
 
         return result
 
+    def plot_all(self):
+        vars = self.get_vars()
+        import matplotlib.pyplot as plt
+
+        fig, axes = plt.subplots(len(vars), len(vars), sharex=True, sharey=True)
+
+        for i, x in enumerate(vars):
+            for j, y in enumerate(vars):
+                self.plot(x, y, ax=axes[i][-1 - j], axes_labels=False)
+
+        for i, x in enumerate(vars):
+            axes[i][0].set_ylabel(x.label.latex)
+
+        for j, y in enumerate(vars):
+            axes[-1][-1 - j].set_xlabel(y.label.latex)
+
+        plt.subplots_adjust(wspace=0, hspace=0)
+
+        return fig, axes
+
     def inspect(self):
         import matplotlib.pyplot as plt
         import ipywidgets as widgets
@@ -354,12 +462,28 @@ class Data(ABC):
         )
 
         def create_plot_var(input_str: str, label: Any):
-            return Computed(
-                label, vars, input_str, vars[0].type
+            expr = Expr.parse(
+                input_str, symbols=self.get_vars()
             )  # TODO: Better type inference
+            return Computed(label, expr)
 
         plot_output = widgets.Output()
         table_output = widgets.Output()
+
+        def show_exception(e):
+            with plot_output:
+                _, ax = plt.subplots(figsize=(8, 6))
+                ax.text(
+                    0.5,
+                    0.5,
+                    str(e),
+                    transform=ax.transAxes,
+                    ha="center",
+                    va="center",
+                    color="red",
+                    fontdict={"size": 8},
+                )
+                plt.show()
 
         # fig, ax = plt.subplots()
         def update(x_str, y_str):
@@ -370,44 +494,37 @@ class Data(ABC):
                 x = create_plot_var(x_str, "x")
                 y = create_plot_var(y_str, "y")
             except Exception as e:
-                with plot_output:
-                    _, ax = plt.subplots(figsize=(8, 6))
-                    ax.text(
-                        0.5,
-                        0.5,
-                        str(e),
-                        transform=ax.transAxes,
-                        ha="center",
-                        va="center",
-                        color="red",
-                        fontdict={"size": 8},
-                    )
-                    plt.show()
+                show_exception(e)
                 return
 
-            table_data = self.copy()
-            table_data.add(x)
-            table_data.add(y)
+            plot_data = ListData(
+                [
+                    {x: x_value, y: y_value}
+                    for x_value, y_value in zip(self.get_values(x), self.get_values(y))
+                ]
+            )
+
+            # table_data = self.copy()
+            # table_data.add(x)
+            # table_data.add(y)
 
             with plot_output:
                 _, ax = plt.subplots(figsize=(8, 6))
                 try:
-                    table_data.plot(x, y, ax=ax)
+                    plot_data.plot(x, y, ax=ax)
+                    plt.show()
                 except Exception as e:
-                    ax.text(
-                        0.5,
-                        0.5,
-                        str(e),
-                        transform=ax.transAxes,
-                        ha="center",
-                        va="center",
-                        color="red",
-                        fontdict={"size": 8},
-                    )
-                plt.show()
+                    show_exception(e)
 
+            table_html = tabulate(
+                plot_data.format_for_target("latex").to_list_of_dicts(),
+                headers="keys",
+                tablefmt="html",
+            )
+            table_html = "<style>td { min-width: 120px; } </style>\n" + table_html
             with table_output:
-                display(table_data.to_data_frame())
+                display(widgets.HTMLMath(value=table_html))
+                # display(table_data.to_data_frame())
 
         update(vars[0].label.ascii, vars[1].label.ascii)
 
@@ -419,24 +536,24 @@ class Data(ABC):
         return widgets.VBox([controls, widgets.HBox([plot_output, table_output])])
 
 
-class ListData(Data):
-    def __init__(self, records: Iterable[RecordLike] = []) -> None:
+class ListData(Data[T]):
+    def __init__(self, records: Iterable[RecordLike[T]] = []) -> None:
         self.records = list(Record.interpret(record) for record in records)
 
-    def get_records(self) -> Iterable[Record]:
+    def get_records(self) -> Iterable[Record[T]]:
         return self.records
 
-    def add_record(self, record: RecordLike) -> None:
+    def add_record(self, record: RecordLike[T]) -> None:
         self.records.append(Record.interpret(record))
 
-    def remove(self, query: RecordQuery) -> None:
+    def remove(self, query: RecordQuery[T]) -> None:
         self.records = [record for record in self.records if not record.matches(query)]
 
     @property
     def size(self) -> int:
         return len(self.records)
 
-    def cache(self) -> Data:
+    def cache(self) -> Data[T]:
         # Return self since we're already cached.
         return self
 
@@ -512,29 +629,66 @@ class PandasData(Data):
         return PandasData(self.data_frame.copy(), self.column_vars)
 
 
-class WhereData(Data):
-    def __init__(self, data: Data, query: RecordQuery):
-        self.data = data
+class ProxyData(Data):
+    def __init__(self, data: DataLike) -> None:
+        self.data = Data.interpret(data)
+
+    def get_records(self) -> Iterable[Record]:
+        return self.data.get_records()
+
+    def add_record(self, record: RecordLike) -> None:
+        self.data.add_record(record)
+
+    def remove(self, query: RecordQuery) -> None:
+        self.data.remove(query)
+
+    @property
+    def size(self) -> int:
+        return self.data.size
+
+
+class ChildData(ProxyData):
+    def __init__(self, data: DataLike, parent_data: DataLike) -> None:
+        self.parent_data = Data.interpret(parent_data)
+        super().__init__(data)
+
+    def get_records(self) -> Iterable[Record]:
+        for parent_record in self.parent_data.get_records():
+            for own_record in self.data.get_records():
+                yield own_record | parent_record
+
+    @property
+    def size(self) -> int:
+        return self.data.size * self.parent_data.size
+
+    def copy(self) -> Data:
+        return ChildData(self.data, self.parent_data)
+
+
+class WhereData(ProxyData):
+    def __init__(self, data: DataLike, query: RecordQuery):
+        if not is_record_query(query):
+            raise TypeError(f"Invalid record query: {query!r}")
+
         self.query = query
+        super().__init__(data)
 
     def get_records(self) -> Iterable[Record]:
         for record in self.data.get_records():
             if record.matches(self.query):
                 yield record
 
-    def add_record(self, record: RecordLike) -> None:
-        return self.data.add_record(record)
-
-    def remove(self, query: RecordQuery) -> None:
-        return self.data.remove(query)
+    @property
+    def size(self) -> int:
+        return sum(1 for _ in self.get_records())
 
     def copy(self) -> Data:
         return WhereData(self.data.copy(), self.query)
 
 
 class CachedData(Data):
-    def __init__(self, data: Data):
-        self.data = data
+    def __init__(self, data: DataLike):
+        self.data = Data.interpret(data)
         self._records: list[Record] | None = None
 
     def get_records(self) -> Iterable[Record]:
@@ -596,6 +750,27 @@ class CombinedData(Data):
 
     def copy(self) -> Data:
         return CombinedData(*(item.copy() for item in self.items))
+
+
+class MappedData(Data[T], Generic[S, T]):
+    def __init__(
+        self, data: Data[S], transform_record: Callable[[Record[S]], Record[T]]
+    ):
+        self.data = data
+        self.transform_record = transform_record
+
+    def get_records(self) -> Iterable[Record[T]]:
+        for record in self.data.get_records():
+            yield self.transform_record(record)
+
+    def add_record(self, record: RecordLike[T]) -> None:
+        raise TypeError("FormattedData is read-only.")
+
+    def remove(self, query: RecordQuery[T]) -> None:
+        raise TypeError("FormattedData is read-only.")
+
+    def copy(self) -> Data[T]:
+        return MappedData(self.data.copy(), self.transform_record)
 
 
 _default_read_csv_kwargs = dict(

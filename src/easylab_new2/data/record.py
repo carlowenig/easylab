@@ -14,10 +14,20 @@ from typing import (
     cast,
     overload,
 )
-from .var import DerivedVar, Var, VarQuery, RecordEntryCondition
+from typing_extensions import TypeGuard
+from .var import (
+    DerivedVar,
+    Var,
+    VarQuery,
+    RecordEntryCondition,
+    VarType,
+    VarTypeLike,
+    is_var_query,
+)
 from .metadata import Metadata, MetadataLike
+from . import data as m_data
 from ..lang import is_text_target, Text, lang
-from ..util import Undefined, undefined, Wildcard, is_wildcard
+from ..internal_util import Undefined, undefined, Wildcard, is_wildcard
 
 T = TypeVar("T")
 S = TypeVar("S")
@@ -51,6 +61,10 @@ def ne(other: Any):
 ValueQuery = Union[T, Callable[[T], bool], Wildcard, str]
 
 
+def is_value_query(input: Any) -> TypeGuard[ValueQuery[T]]:
+    return True
+
+
 comparison_operators = (">", ">=," "<", "<=", "==", "!=", "is", "in")
 
 
@@ -74,9 +88,29 @@ def value_matches(value: T, query: ValueQuery[T]) -> bool:
 
 RecordEntryLike = Union["RecordEntry[T]", tuple[Var[T], T]]
 
+
+def is_record_entry_like(input: Any) -> TypeGuard[RecordEntryLike[T]]:
+    return isinstance(input, RecordEntry) or (
+        isinstance(input, tuple) and len(input) == 2 and isinstance(input[0], Var)
+    )
+
+
 RecordEntryQuery = Union[
-    VarQuery[T], tuple[VarQuery[T], ValueQuery[T]], RecordEntryCondition
+    VarQuery[T], tuple[VarQuery[T], ValueQuery[T]], RecordEntryCondition[T]
 ]
+
+
+def is_record_entry_query(input: Any) -> TypeGuard[RecordEntryQuery[T]]:
+    return (
+        is_var_query(input)
+        or (
+            isinstance(input, tuple)
+            and len(input) == 2
+            and is_var_query(input[0])
+            and is_value_query(input[1])
+        )
+        or isinstance(input, RecordEntryCondition)
+    )
 
 
 class RecordEntry(Generic[T]):
@@ -181,13 +215,40 @@ class RecordEntry(Generic[T]):
         return self.copy()
 
 
-RecordInput = Union[Iterable[RecordEntryLike], dict[Var[Any], Any]]
+RecordInput = Union[Iterable[RecordEntryLike[T]], dict[Var[T], T]]
 
-RecordLike = Union["Record", RecordInput]
+
+def is_record_input(input: Any) -> TypeGuard[RecordInput[T]]:
+    return isinstance(input, Iterable) or isinstance(input, dict)
+
+
+RecordLike = Union["Record[T]", RecordInput[T], "m_data.DataLike"]
+
+
+def is_record_like(input: Any) -> TypeGuard[RecordLike[T]]:
+    return (
+        isinstance(input, Record)
+        or is_record_input(input)
+        or m_data.is_data_like(input)
+    )
+
 
 RecordQuery = Union[
-    RecordEntryQuery, tuple[RecordEntryQuery, ...], list[RecordEntryQuery], Wildcard
+    RecordEntryQuery[T],
+    tuple[RecordEntryQuery[T], ...],
+    list[RecordEntryQuery[T]],
+    Wildcard,
 ]
+
+
+def is_record_query(input: Any) -> TypeGuard[RecordQuery[T]]:
+    return (
+        is_wildcard(input)
+        or isinstance(input, tuple)
+        or isinstance(input, list)
+        or is_record_entry_query(input)
+    )
+
 
 ComparisonLike = Union["Comparison[T]", tuple[T, T]]
 
@@ -291,18 +352,25 @@ class VarNotFoundException(Exception):
         return f"No var found for query {self.query!r}."
 
 
-class Record:
+S = TypeVar("S")
+
+
+class Record(Generic[T]):
     @staticmethod
-    def interpret(input: RecordLike) -> Record:
+    def interpret(input: RecordLike[T]) -> Record[T]:
         if isinstance(input, Record):
             return input
-        else:
+        elif is_record_input(input):
             return Record(input)
+        elif m_data.is_data_like(input):
+            return cast(Record[T], m_data.Data.interpret(input).to_record())
+        else:
+            raise TypeError(f"Cannot interpret {input!r} as Record.")
 
-    _entries: list[RecordEntry[Any]]
+    _entries: list[RecordEntry[T]]
 
     def __init__(
-        self, entries: RecordInput, *, metadata_hint: Metadata | None = None
+        self, entries: RecordInput[T], *, metadata_hint: Metadata | None = None
     ) -> None:
         if isinstance(entries, dict):
             entries_ = ((cast(Var, var), value) for var, value in entries.items())
@@ -321,20 +389,20 @@ class Record:
         return len(self._entries)
 
     @property
-    def entries(self) -> list[RecordEntry[Any]]:
+    def entries(self) -> list[RecordEntry[T]]:
         return self._entries
 
-    def get_entry_or_none(self, query: RecordEntryQuery[T]) -> RecordEntry[T] | None:
+    def get_entry_or_none(self, query: RecordEntryQuery[S]) -> RecordEntry[S] | None:
         for entry in self._entries:
             if entry.matches(query):
-                return entry
+                return cast(RecordEntry[S], entry)
 
         if isinstance(query, DerivedVar):
             return RecordEntry(
                 query, query.get_value(self), metadata={"source": "derived"}
             )
 
-    def get_entry(self, query: RecordEntryQuery[T]) -> RecordEntry[T]:
+    def get_entry(self, query: RecordEntryQuery[S]) -> RecordEntry[S]:
         entry = self.get_entry_or_none(query)
 
         if entry is None:
@@ -350,42 +418,50 @@ class Record:
 
         # raise NoRecordEntryFoundException(query)
 
-    def get_value(self, query: RecordEntryQuery[T]) -> T:
+    def get_value(self, query: RecordEntryQuery[S]) -> S:
         return self.get_entry(query).value
 
-    def get_value_or_undefined(self, query: RecordEntryQuery[T]) -> T | Undefined:
+    def get_value_or_undefined(self, query: RecordEntryQuery[S]) -> S | Undefined:
         entry = self.get_entry_or_none(query)
         if entry is None:
             return undefined
         else:
             return entry.value
 
-    def get_derived_value(self, derived_var: DerivedVar[T]) -> T:
+    def get_derived_value(self, derived_var: DerivedVar[S]) -> S:
         return derived_var.get_value(self)
 
     def set_value(self, query: RecordEntryQuery, value: Any) -> None:
         self.get_entry(query).value = value
 
-    def get_formatted_value(self, query: RecordEntryQuery[T]) -> Text:
+    def get_formatted_value(self, query: RecordEntryQuery) -> Text:
         return self.get_entry(query).get_formatted_value()
 
-    def get_vars(self, query: RecordEntryQuery[T] = "*") -> list[Var[T]]:
+    @overload
+    def get_vars(self) -> list[Var[T]]:
+        ...
+
+    @overload
+    def get_vars(self, query: RecordEntryQuery[S]) -> list[Var[S]]:
+        ...
+
+    def get_vars(self, query: RecordEntryQuery[S] = "*") -> list[Var[S]]:
         vars = []
         for entry in self._entries:
             if entry.matches(query):
                 vars.append(entry.var)
         return vars
 
-    def get_var_or_none(self, query: RecordEntryQuery[T]) -> Var[T] | None:
+    def get_var_or_none(self, query: RecordEntryQuery[S]) -> Var[S] | None:
         for entry in self._entries:
             if entry.matches(query):
-                return entry.var
+                return cast(Var[S], entry.var)
 
         if isinstance(query, DerivedVar):
             # and all(d in self for d in query.get_dependencies()):
             return query
 
-    def get_var(self, query: RecordEntryQuery[T]) -> Var[T]:
+    def get_var(self, query: RecordEntryQuery[S]) -> Var[S]:
         var = self.get_var_or_none(query)
 
         if var is None:
@@ -396,7 +472,7 @@ class Record:
     def set_var(self, query: RecordEntryQuery, var: Var) -> None:
         self.get_entry(query).var = var
 
-    def __getitem__(self, query: RecordEntryQuery[T]) -> T:
+    def __getitem__(self, query: RecordEntryQuery[S]) -> S:
         if query in self:
             return self.get_value(query)
         elif isinstance(query, DerivedVar):
@@ -405,7 +481,7 @@ class Record:
         if isinstance(query, Var):
             default = query.default()
             if default is not undefined:
-                return cast(T, default)
+                return cast(S, default)
 
         raise RecordEntryNotFoundException(query)
 
@@ -473,8 +549,87 @@ class Record:
         else:
             return any(entry.matches(query) for entry in self._entries)
 
+    # Transform all entries to some new type S
     @overload
-    def to_dict(self, keys: Literal["vars"]) -> dict[Var, Any]:
+    def map(
+        self,
+        query: Wildcard,
+        transform_matched_entry: Callable[[RecordEntry[T]], RecordEntryLike[S]],
+    ) -> Record[S]:
+        ...
+
+    # Transform to same type T
+    @overload
+    def map(
+        self,
+        query: RecordEntryQuery[S],
+        transform_matched_entry: Callable[[RecordEntry[S]], RecordEntryLike[T]],
+    ) -> Record[T]:
+        ...
+
+    # Transform to unknown type
+    @overload
+    def map(
+        self,
+        query: RecordEntryQuery[S],
+        transform_matched_entry: Callable[[RecordEntry[S]], RecordEntryLike],
+    ) -> Record:
+        ...
+
+    def map(
+        self,
+        query: RecordEntryQuery[S],
+        transform_matched_entry: Callable[[RecordEntry[S]], RecordEntryLike],
+    ) -> Record:
+        return Record(
+            transform_matched_entry(cast(RecordEntry[S], entry))
+            if entry.matches(query)
+            else entry
+            for entry in self._entries
+        )
+
+    # Pluck all entries to some new type S
+    @overload
+    def pluck(self, query: Wildcard, attr: str, type_: VarTypeLike[S]) -> Record[S]:
+        ...
+
+    # Pluck to unknown type
+    @overload
+    def pluck(self, query: RecordEntryQuery, attr: str) -> Record:
+        ...
+
+    # General signature
+    @overload
+    def pluck(
+        self, query: RecordEntryQuery, attr: str, type_: VarTypeLike | None = None
+    ) -> Record:
+        ...
+
+    def pluck(
+        self, query: RecordEntryQuery, attr: str, type_: VarTypeLike | None = None
+    ) -> Record:
+        if type_ is not None:
+            if not is_wildcard(query):
+                raise ValueError(
+                    "Specifying an attr type does only make sense, when all entries are being plucked. If you want to specify a type, use a wildcard query, i.e. '*' or Ellipsis."
+                )
+
+            type_ = VarType.interpret(type_)
+
+        def transform_matched_entry(
+            entry: RecordEntry, type_: VarType | None
+        ) -> RecordEntryLike:
+            value = getattr(entry.value, attr)
+            if type_ is not None:
+                type_.check(value)
+
+            plucked_var = Var(entry.var.label + "." + attr, type_ or object)
+            return RecordEntry(plucked_var, value)
+
+        return self.map(query, lambda entry: transform_matched_entry(entry, type_))
+
+    @overload
+    def to_dict(self, keys: Literal["vars"]) -> dict[Var[T], T]:
         ...
 
     @overload
@@ -483,7 +638,7 @@ class Record:
         keys: Literal[
             "labels.ascii", "labels.unicode", "labels.latex"
         ] = "labels.ascii",
-    ) -> dict[str, Any]:
+    ) -> dict[str, T]:
         ...
 
     @overload
@@ -492,7 +647,7 @@ class Record:
         keys: Literal[
             "vars", "labels.ascii", "labels.unicode", "labels.latex"
         ] = "labels.ascii",
-    ) -> dict[Any, Any]:
+    ) -> dict[Any, T]:
         ...
 
     def to_dict(
@@ -500,7 +655,7 @@ class Record:
         keys: Literal[
             "vars", "labels.ascii", "labels.unicode", "labels.latex"
         ] = "labels.ascii",
-    ) -> dict[Any, Any]:
+    ) -> dict[Any, T]:
         if keys == "var":
             return {entry.var: entry.value for entry in self._entries}
         elif keys.startswith("labels."):
@@ -513,20 +668,22 @@ class Record:
 
         raise ValueError(f"Invalid keys argument: {keys!r}")
 
-    def copy(self, copy_entries: bool = True) -> Record:
+    def copy(self, copy_entries: bool = True) -> Record[T]:
         if copy_entries:
             return Record(entry.copy() for entry in self._entries)
         else:
             return Record(self._entries)
 
-    def __copy__(self) -> Record:
+    def __copy__(self) -> Record[T]:
         return self.copy()
 
-    def compare(self, other: RecordLike, include_equal: bool = False) -> Record:
+    def compare(
+        self, other: RecordLike[T], include_equal: bool = False
+    ) -> Record[Comparison[T | Undefined]]:
         """Returns a record containing the comparisons between the two records."""
         other = Record.interpret(other)
 
-        entries: dict[ComparisonVar[Any], Any] = {}
+        entries: dict[Var[Comparison[T | Undefined]], Comparison[T | Undefined]] = {}
 
         self_vars = set(self.get_vars())
         other_vars = set(other.get_vars())
@@ -546,7 +703,7 @@ class Record:
             elif var in other_vars:
                 entries[comp_var] = Comparison(undefined, other.get_value(var))
 
-        return Record(entries)  # type: ignore # TODO: fix typing
+        return Record(entries)
 
     def union(
         self, other: RecordLike, combine: Callable[[Any, Any], Any] = take_first
@@ -594,3 +751,19 @@ class Record:
             return self._entries[0]
         else:
             return self
+
+
+_dummy_var = Var("dummy")
+_dummy_entry = RecordEntry(_dummy_var, None)
+
+
+class ObserverRecord(Record[T]):
+    def __init__(self):
+        super().__init__([])
+        self.accessed_vars: list[Var] = []
+
+    def get_entry_or_none(self, query: RecordEntryQuery[S]) -> RecordEntry[S] | None:
+        if isinstance(query, Var):
+            self.accessed_vars.append(query)
+
+        return cast(RecordEntry[S], _dummy_entry)

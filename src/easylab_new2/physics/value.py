@@ -19,7 +19,7 @@ from typing_extensions import TypeGuard
 
 from ..data import VarType, Var
 from ..lang import Text, lang
-from ..util import format_args
+from ..internal_util import format_args
 
 Unit = Any  # TODO
 
@@ -61,7 +61,86 @@ def infer_prec(val: float, unc: float | None, significant_digits: int = 2) -> in
     return result
 
 
+PhysicalValueLike = Union[
+    "PhysicalValue",
+    str,
+    SupportsFloat,
+]
+
+
+def is_physical_value_like(value: Any) -> TypeGuard[PhysicalValueLike]:
+    return isinstance(value, (PhysicalValue, str, SupportsFloat))
+
+
 class PhysicalValue(ABC):
+    @staticmethod
+    def interpret(input: PhysicalValueLike) -> PhysicalValue:
+        if isinstance(input, PhysicalValue):
+            return input
+        elif isinstance(input, str):
+            num_pattern = (
+                r"(?:[-+]?(?:[0-9]*[.,]?[0-9]+)|(?:[0-9]+[.,]))([eE][-+]?[0-9]+)?"
+            )
+            val_pattern = r"(?P<val>" + num_pattern + ")"
+            unc_int_pattern = r"(?:\(\s*(?P<unc_int>[0-9]+)\s*\))"
+            pm_pattern = r"\+\/?-?"
+            unc_val_pattern = (
+                r"(?:" + pm_pattern + r"\s*(?P<unc_val>" + num_pattern + r"))"
+            )
+            unc_pattern = r"(?:" + unc_int_pattern + "|" + unc_val_pattern + r")?"
+            exp_pattern = r"([eE](?P<exp>[-+]?[0-9]+))?"
+            unit_pattern = r"(?P<unit>.*)"
+
+            pattern = (
+                r"^\s*"
+                + val_pattern
+                + r"\s*"
+                + unc_pattern
+                + r"\s*"
+                + exp_pattern
+                + r"\s*"
+                + unit_pattern
+                + r"$"
+            )
+            # print("pattern", pattern)
+
+            match = re.match(pattern, input)
+
+            if match is None:
+                raise ValueError("Invalid input string: " + input)
+
+            val = match.group("val").replace(",", ".")
+            prec = get_float_prec(val)
+            val = float(val)
+            unc_int = match.group("unc_int")
+            unc_val = match.group("unc_val")
+            exp = match.group("exp")
+            unit = match.group("unit")
+
+            if unc_int is not None:
+                unc = 10 ** -prec * int(unc_int)
+            elif unc_val is not None:
+                unc_val = unc_val.replace(",", ".")
+                prec = max(prec, get_float_prec(unc_val))
+                unc = float(unc_val.replace(",", "."))
+            else:
+                unc = 0
+
+            if exp is not None:
+                exp = int(exp)
+                val *= 10 ** exp
+                unc *= 10 ** exp
+                prec -= exp
+
+            return MeasuredValue(val, unc, unit, prec)
+
+        try:
+            return MeasuredValue(float(input))
+        except Exception as e:
+            raise TypeError(
+                f"Cannot interpret type {type(input)} as a measured value. {e}"
+            )
+
     val: float
     unc: float | None
     unit: Unit
@@ -134,86 +213,47 @@ class PhysicalValue(ABC):
     def get_dependencies(self) -> Iterable[MeasuredValue]:
         return []
 
+    def __add__(self, other: PhysicalValueLike):
+        return SymbolicallyComputedValue("a + b", a=self, b=other)
 
-MeasuredValueLike = Union[
-    "MeasuredValue",
-    str,
-    SupportsFloat,
-]
+    def __radd__(self, other: PhysicalValueLike):
+        return SymbolicallyComputedValue("a + b", a=other, b=self)
 
+    def __sub__(self, other: PhysicalValueLike):
+        return SymbolicallyComputedValue("a - b", a=self, b=other)
 
-def is_measured_value_like(value: Any) -> TypeGuard[MeasuredValueLike]:
-    return isinstance(value, (MeasuredValue, str, SupportsFloat))
+    def __rsub__(self, other: PhysicalValueLike):
+        return SymbolicallyComputedValue("a - b", a=other, b=self)
+
+    def __mul__(self, other: PhysicalValueLike):
+        return SymbolicallyComputedValue("a * b", a=self, b=other)
+
+    def __rmul__(self, other: PhysicalValueLike):
+        return SymbolicallyComputedValue("a * b", a=other, b=self)
+
+    def __truediv__(self, other: PhysicalValueLike):
+        return SymbolicallyComputedValue("a / b", a=self, b=other)
+
+    def __rtruediv__(self, other: PhysicalValueLike):
+        return SymbolicallyComputedValue("a / b", a=other, b=self)
+
+    def __pow__(self, other: PhysicalValueLike):
+        return SymbolicallyComputedValue("a ** b", a=self, b=other)
+
+    def __rpow__(self, other: PhysicalValueLike):
+        return SymbolicallyComputedValue("a ** b", a=other, b=self)
+
+    def __neg__(self):
+        return SymbolicallyComputedValue("-a", a=self)
+
+    def __pos__(self):
+        return self
+
+    def __abs__(self):
+        return SymbolicallyComputedValue("abs(a)", a=self)
 
 
 class MeasuredValue(PhysicalValue):
-    @staticmethod
-    def interpret(input: MeasuredValueLike) -> MeasuredValue:
-        if isinstance(input, MeasuredValue):
-            return input
-        elif isinstance(input, str):
-            num_pattern = (
-                r"(?:[-+]?(?:[0-9]*[.,]?[0-9]+)|(?:[0-9]+[.,]))([eE][-+]?[0-9]+)?"
-            )
-            val_pattern = r"(?P<val>" + num_pattern + ")"
-            unc_int_pattern = r"(?:\(\s*(?P<unc_int>[0-9]+)\s*\))"
-            pm_pattern = r"\+\/?-?"
-            unc_val_pattern = (
-                r"(?:" + pm_pattern + r"\s*(?P<unc_val>" + num_pattern + r"))"
-            )
-            unc_pattern = r"(?:" + unc_int_pattern + "|" + unc_val_pattern + r")?"
-            exp_pattern = r"([eE](?P<exp>[-+]?[0-9]+))?"
-            unit_pattern = r"(?P<unit>.*)"
-
-            pattern = (
-                r"^\s*"
-                + val_pattern
-                + r"\s*"
-                + unc_pattern
-                + r"\s*"
-                + exp_pattern
-                + r"\s*"
-                + unit_pattern
-                + r"$"
-            )
-            # print("pattern", pattern)
-
-            match = re.match(pattern, input)
-
-            if match is None:
-                raise ValueError("Invalid input string: " + input)
-
-            val = match.group("val").replace(",", ".")
-            prec = get_float_prec(val)
-            val = float(val)
-            unc_int = match.group("unc_int")
-            unc_val = match.group("unc_val")
-            exp = match.group("exp")
-            unit = match.group("unit")
-
-            if unc_int is not None:
-                unc = 10 ** -prec * int(unc_int)
-            elif unc_val is not None:
-                unc_val = unc_val.replace(",", ".")
-                prec = max(prec, get_float_prec(unc_val))
-                unc = float(unc_val.replace(",", "."))
-            else:
-                unc = 0
-
-            if exp is not None:
-                exp = int(exp)
-                val *= 10 ** exp
-                unc *= 10 ** exp
-                prec -= exp
-
-            return MeasuredValue(val, unc, unit, prec)
-        elif isinstance(input, SupportsFloat):
-            return MeasuredValue(float(input))
-        else:
-            raise TypeError(
-                f"Cannot interpret type {type(input).__name__} as a measured value."
-            )
-
     def __init__(
         self,
         val: SupportsFloat,
@@ -230,9 +270,9 @@ class MeasuredValue(PhysicalValue):
 class ComputedValue(PhysicalValue):
     def __init__(
         self,
-        params: Iterable[PhysicalValue],
+        params: Iterable[PhysicalValueLike],
     ):
-        self.params = list(params)
+        self.params = [PhysicalValue.interpret(p) for p in params]
 
     @abstractmethod
     def _compute_val(self, *param_vals: float) -> float:
@@ -317,7 +357,7 @@ def eval_rel(value: AbsoluteOrRelative[T], base: T) -> T:
 class NumericallyComputedValue(ComputedValue):
     def __init__(
         self,
-        params: Iterable[PhysicalValue],
+        params: Iterable[PhysicalValueLike],
         func: Callable[..., Any],
         derivative_dx: AbsoluteOrRelative[float] = rel(1e-6),
     ):
@@ -368,14 +408,15 @@ class SymbolicallyComputedValue(ComputedValue):
     def __init__(
         self,
         expr: Any,
-        **params_by_name: PhysicalValue,
+        **params_by_name: PhysicalValueLike,
     ):
         from sympy import Expr, sympify, Symbol
 
         self.param_symbols = {name: Symbol(name) for name in params_by_name}
 
         self.params_by_symbol = {
-            self.param_symbols[name]: p for name, p in params_by_name.items()
+            self.param_symbols[name]: PhysicalValue.interpret(p)
+            for name, p in params_by_name.items()
         }
         self.expr: Expr = sympify(expr, locals=self.param_symbols)
 
@@ -383,7 +424,7 @@ class SymbolicallyComputedValue(ComputedValue):
             self.expr.diff(symbol) for symbol in self.params_by_symbol
         ]
 
-        super().__init__(params_by_name.values())
+        super().__init__(self.params_by_symbol.values())
 
     def _compute_val(self, *param_vals: float) -> float:
         val = self.expr.evalf(
@@ -411,7 +452,7 @@ class SymbolicallyComputedValue(ComputedValue):
 
 
 @overload
-def value(measured: MeasuredValueLike, /) -> MeasuredValue:
+def value(measured: PhysicalValueLike, /) -> MeasuredValue:
     ...
 
 

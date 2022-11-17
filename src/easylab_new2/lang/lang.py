@@ -38,6 +38,10 @@ class Text:
             self._target_strings[target] = string
 
     @property
+    def target_strings(self) -> dict[TextTarget, str]:
+        return self._target_strings
+
+    @property
     def ascii(self):
         return self.get("ascii")
 

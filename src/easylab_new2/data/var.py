@@ -1,7 +1,6 @@
 from __future__ import annotations
 from abc import ABC, abstractmethod
 import inspect
-import keyword
 from typing import (
     Any,
     Callable,
@@ -11,18 +10,20 @@ from typing import (
     TypeVar,
     Union,
     cast,
-    get_args,
     overload,
 )
+from typing_extensions import TypeGuard
 
 from ..lang import Text, lang
-from ..util import undefined, Undefined, Wildcard, is_wildcard
+from ..internal_util import undefined, Undefined, Wildcard, is_wildcard
+from ..expr import Expr, ExprLike, Symbol
 
-from . import record
-from .var_type import VarType, VarTypeLike, is_var_type_like
+from . import record as m_record
+from .var_type import VarType, VarTypeLike
 from .metadata import Metadata, MetadataLike
 
 T = TypeVar("T")
+S = TypeVar("S")
 
 
 def get_neutral(type_: type[T]) -> T:
@@ -60,6 +61,201 @@ def get_neutral(type_: type[T]) -> T:
         raise TypeError(f"Cannot get neutral element for type {type_!r}.")
 
 
+# import sympy
+
+
+# VarExprLike = Union["VarExpr[T]", "Var[T]", tuple[Iterable["Var"], Any], Any]
+
+
+# def get_var_type_from_sympy(expr: sympy.Expr) -> VarType | None:
+#     if isinstance(expr, sympy.Integer):
+#         return VarType.interpret(int)
+#     elif isinstance(expr, sympy.Float):
+#         return VarType.interpret(float)
+
+
+# class VarExpr(Generic[T]):
+#     @staticmethod
+#     def interpret(input: VarExprLike[T]) -> VarExpr[T]:
+#         if isinstance(input, VarExpr):
+#             return input
+#         elif isinstance(input, Var):
+#             return VarExpr(sympy.Symbol(input.label.latex), input.type, [input])
+#         elif isinstance(input, tuple) and len(input) == 2:
+#             deps, expr = input
+#             expr: sympy.Expr = sympy.sympify(input)
+#             type_ = get_var_type_from_sympy(expr)
+#             return VarExpr(expr, type_ or cast(type[T], object), deps)
+#         else:
+#             return VarExpr(input, cast(type[T], object), [])
+
+#     def __init__(
+#         self, sympy_expr: Any, type_: VarTypeLike[T], dependencies: Iterable[Var]
+#     ) -> None:
+#         self._sympy_expr: sympy.Expr = sympy.sympify(sympy_expr)
+#         self._type = VarType.interpret(type_)
+#         self._dependencies = list(dependencies)
+
+#     @property
+#     def sympy_expr(self):
+#         return self._sympy_expr
+
+#     @property
+#     def type(self) -> VarType[T]:
+#         return self._type
+
+#     @property
+#     def dependencies(self) -> list[Var]:
+#         return self._dependencies
+
+#     @functools.cache
+#     def _create_evaluator(self, **lambdify_kwargs) -> Callable:
+#         return sympy.lambdify(
+#             [dep.sympy_expr for dep in self.dependencies],
+#             self.sympy_expr,
+#             **lambdify_kwargs,
+#         )
+
+#     def evaluate_for_args(self, *args) -> T:
+#         evaluator = self._create_evaluator()
+#         result = self.type.parse(evaluator(*args))
+#         self.type.check(result)
+#         return result
+
+#     def evaluate_for_record(self, record: "m_record.Record") -> T:
+#         args = [record[dep] for dep in self.dependencies]
+#         return self.evaluate_for_args(*args)
+
+#     def transform(self, f: Callable[[sympy.Expr], Any]):
+#         return VarExpr(f(self.sympy_expr), self.type, self.dependencies)
+
+#     def combine(self, other: VarExprLike, f: Callable[[sympy.Expr, sympy.Expr], Any]):
+#         other = VarExpr.interpret(other)
+#         return VarExpr(
+#             f(self.sympy_expr, other.sympy_expr),
+#             self.type,
+#             self.dependencies + other.dependencies,
+#         )
+
+#     @property
+#     @functools.cache
+#     def text(self):
+#         latex = sympy.latex(self.sympy_expr, mode="inline")
+#         return Text(str(self.sympy_expr), latex=latex)
+
+#     def __repr__(self):
+#         return self.text.ascii
+
+#     def __str__(self):
+#         return self.text.ascii
+
+#     def __add__(self, other: VarExprLike):
+#         return self.combine(other, lambda a, b: a + b)
+
+#     def __radd__(self, other: VarExprLike):
+#         return VarExpr.interpret(other) + self
+
+#     def __sub__(self, other: VarExprLike):
+#         return self.combine(other, lambda a, b: a - b)
+
+#     def __rsub__(self, other: VarExprLike):
+#         return VarExpr.interpret(other) - self
+
+#     def __mul__(self, other: VarExprLike):
+#         return self.combine(other, lambda a, b: a * b)
+
+#     def __rmul__(self, other: VarExprLike):
+#         return VarExpr.interpret(other) * self
+
+#     def __truediv__(self, other: VarExprLike):
+#         return self.combine(other, lambda a, b: a / b)
+
+#     def __rtruediv__(self, other: VarExprLike):
+#         return VarExpr.interpret(other) / self
+
+#     def __pow__(self, other: VarExprLike):
+#         return self.combine(other, lambda a, b: a ** b)
+
+#     def __rpow__(self, other: VarExprLike):
+#         return VarExpr.interpret(other) ** self
+
+#     def __neg__(self):
+#         return self.transform(lambda a: -a)
+
+#     def __pos__(self):
+#         return self
+
+#     def __abs__(self):
+#         return self.transform(abs)
+
+
+# def varize(sympy_func) -> Callable[..., VarExpr]:
+#     @functools.wraps(sympy_func)
+#     def wrapper(*args, **kwargs):
+#         type_: VarType | None = None
+#         dependencies: list[Var] = []
+
+#         sympy_args = []
+#         for arg in args:
+#             if isinstance(arg, VarExpr):
+#                 sympy_args.append(arg.sympy_expr)
+#                 dependencies.extend(arg.dependencies)
+#                 if type_ is None:
+#                     type_ = arg.type
+#             elif isinstance(arg, Var):
+#                 sympy_args.append(sympy.Symbol(arg.label.latex))
+#                 dependencies.append(arg)
+#                 if type_ is None:
+#                     type_ = arg.type
+#             else:
+#                 sympy_args.append(arg)
+
+#         sympy_kwargs = {}
+#         for key, arg in kwargs.items():
+#             if isinstance(arg, VarExpr):
+#                 sympy_kwargs[key] = arg.sympy_expr
+#                 dependencies.extend(arg.dependencies)
+#                 if type_ is None:
+#                     type_ = arg.type
+#             elif isinstance(arg, Var):
+#                 sympy_kwargs[key] = sympy.Symbol(arg.label.latex)
+#                 dependencies.append(arg)
+#                 if type_ is None:
+#                     type_ = arg.type
+#             else:
+#                 sympy_kwargs[key] = arg
+
+#         return VarExpr(
+#             sympy_func(*sympy_args, **sympy_kwargs), type_ or object, dependencies
+#         )
+
+#     return wrapper
+
+
+# sin = varize(sympy.sin)
+# cos = varize(sympy.cos)
+# tan = varize(sympy.tan)
+# cot = varize(sympy.cot)
+
+# asin = varize(sympy.asin)
+# acos = varize(sympy.acos)
+# atan = varize(sympy.atan)
+# acot = varize(sympy.acot)
+
+# sinh = varize(sympy.sinh)
+# cosh = varize(sympy.cosh)
+# tanh = varize(sympy.tanh)
+# coth = varize(sympy.coth)
+
+# exp = varize(sympy.exp)
+# log = varize(sympy.log)
+
+# sqrt = varize(sympy.sqrt)
+
+# diff = varize(sympy.diff)
+# integrate = varize(sympy.integrate)
+
+
 def interpret_var_label(
     label: Any,
     math: bool = True,
@@ -89,46 +285,47 @@ def interpret_var_label(
         return text
 
 
-class Var(Generic[T]):
+class Var(Symbol["Var[T]", T], Generic[T]):
     def __init__(
         self,
         label: Any,
         type_: VarTypeLike[T] = object,
         metadata: MetadataLike = None,
+        name: str | None = None,
     ) -> None:
         self._label = interpret_var_label(label)
-        self._type = VarType.interpret(type_)
         self.metadata = Metadata.interpret(metadata)
+        self._type = VarType.interpret(type_)
+
+        if name is None:
+            name = self.label.ascii
+
+        super().__init__(name, self._type.value_type)
 
     @property
     def label(self) -> Text:
         return self._label
 
-    @label.setter
-    def label(self, label: Any) -> None:
-        self._label = Text.interpret(label)
-        self.metadata.update()
-
     @property
     def type(self) -> VarType[T]:
         return self._type
 
-    @type.setter
-    def type(self, type_: VarTypeLike[T]) -> None:
-        self._type = VarType.interpret(type_)
-        self.metadata.update()
+    # Override evaluate method with parsing
+    # def evaluate(self, *args, check_type: bool = True) -> T:
+    #     result = super().evaluate(
+    #         *args, check_type=False
+    #     )  # Type checking is done by parse function
+    #     return self.parse(result, check=check_type)
 
     def default(self) -> T | Undefined:
-        return self.type.default()
+        return self._type.default()
 
     def has_default(self):
         return self.default() is not undefined
 
-    def __repr__(self) -> str:
-        return f"{type(self).__name__}(label={self.label!r}, type={self.type!r}, metadata={self.metadata!r})"
-
-    def __str__(self) -> str:
-        return self.label.ascii
+    @property
+    def text(self) -> Text:
+        return self.label
 
     @overload
     def format(self, value: Any, *, check: bool = True) -> Text:
@@ -140,17 +337,17 @@ class Var(Generic[T]):
 
     def format(self, value: Any, *, parse: bool = True, check: bool = True) -> Text:
         if parse:
-            value = self.type.parse(value)
+            value = self._type.parse(value)
 
         if check:
-            self.type.check(value)
+            self._type.check(value)
 
-        return self.type.format(value)
+        return self._type.format(value)
 
     def parse(self, raw: Any, *, check: bool = True) -> T:
-        result = self.type.parse(raw)
+        result = self._type.parse(raw)
         if check:
-            self.type.check(result)
+            self._type.check(result)
         return result
 
     def compute_by(
@@ -164,12 +361,12 @@ class Var(Generic[T]):
         self, value: Any, *, parse: bool = True, check: bool = True
     ) -> Any:
         if parse:
-            value = self.type.parse(value)
+            value = self._type.parse(value)
 
         if check:
-            self.type.check(value)
+            self._type.check(value)
 
-        return self.type.get_plot_value(value)
+        return self._type.get_plot_value(value)
 
     @overload
     def equal(self, a: Any, b: Any, *, check: bool = True) -> bool:
@@ -181,14 +378,14 @@ class Var(Generic[T]):
 
     def equal(self, a: Any, b: Any, *, parse: bool = True, check: bool = True) -> bool:
         if parse:
-            a = self.type.parse(a)
-            b = self.type.parse(b)
+            a = self._type.parse(a)
+            b = self._type.parse(b)
 
         if check:
-            self.type.check(a)
-            self.type.check(b)
+            self._type.check(a)
+            self._type.check(b)
 
-        return self.type.equal(a, b)
+        return self._type.equal(a, b)
 
     @overload
     def check(self, value: Any, *, parse: bool = True) -> None:
@@ -200,9 +397,9 @@ class Var(Generic[T]):
 
     def check(self, value: Any, *, parse: bool = True) -> None:
         if parse:
-            value = self.type.parse(value)
+            value = self._type.parse(value)
 
-        self.type.check(value)
+        self._type.check(value)
 
     def entry(self, value: Any):
         from ..data import RecordEntry
@@ -210,11 +407,12 @@ class Var(Generic[T]):
         return RecordEntry(self, self.parse(value))
 
     def matches(self, query: VarQuery) -> bool:
+
         if is_wildcard(query) or query is self:
             return True
 
         if isinstance(query, str):
-            if self.label.matches(query):
+            if self._label.matches(query):
                 return True
 
             if ":" in query:
@@ -222,18 +420,18 @@ class Var(Generic[T]):
                 key = key.strip()
                 value = value.strip()
                 if key == "label":
-                    return self.label.matches(value)
+                    return self._label.matches(value)
                 if key == "type":
-                    return self.type.matches(value)
+                    return self._type.matches(value)
                 if key == "metadata":
                     return self.metadata.matches(value)
 
             return False
 
         if isinstance(query, dict):
-            if "label" in query and not self.label.matches(query["label"]):
+            if "label" in query and not self._label.matches(query["label"]):
                 return False
-            if "type" in query and not self.type.matches(query["type"]):
+            if "type" in query and not self._type.matches(query["type"]):
                 return False
             if "metadata" in query and not self.metadata.matches(query["metadata"]):
                 return False
@@ -249,15 +447,15 @@ class Var(Generic[T]):
             return True
 
         if isinstance(query, Var):
-            return self.label.matches(query.label)
+            return self._label.matches(query.label)
 
         return False
         # raise TypeError(f"Cannot match var {self} by query of type {type(query).__name__}.")
 
-    def __eq__(self, other: Any) -> RecordEntryCondition:
+    def eq(self, other: Any) -> RecordEntryCondition:
         return RecordEntryCondition.for_other(self, other, lambda x, y: x == y)
 
-    def __ne__(self, other: Any) -> RecordEntryCondition:
+    def ne(self, other: Any) -> RecordEntryCondition:
         return RecordEntryCondition.for_other(self, other, lambda x, y: x != y)
 
     def __lt__(self, other: Any) -> RecordEntryCondition:
@@ -275,17 +473,51 @@ class Var(Generic[T]):
     def __contains__(self, other: Any) -> RecordEntryCondition:
         return RecordEntryCondition.for_other(self, other, lambda x, y: y in x)
 
+    def __eq__(self, other: Any):
+        return isinstance(other, Var) and self.matches(other)
+
     def __hash__(self):
         return id(self)
 
     def sub(self, *subscripts: Any):
         return Var(self.label.subscript(Text(", ").join(subscripts)), self.type)
 
+    @overload
+    def wrap(self, function_name: Any) -> Var[T]:
+        ...
+
+    @overload
+    def wrap(self, function_name: Any, type_: VarTypeLike[S]) -> Var[S]:
+        ...
+
+    def wrap(self, function_name: Any, type_: VarTypeLike | None = None) -> Var:
+        return Var(function_name + lang.par(self.label), type_ or self.type)
+
+    def copy(
+        self,
+        *,
+        label: Text | None = None,
+        type: VarTypeLike[T] | None = None,
+        metadata: Metadata | None = None,
+    ):
+        return Var(label or self.label, type or self.type, metadata or self.metadata)
+
+
+def vars(labels: Iterable[Any] | str, type_: VarTypeLike[T] = object):
+    if isinstance(labels, str):
+        labels = labels.strip().split(" ")
+
+    return [Var(label, type_) for label in labels]
+
 
 VarQuery = Union[Var[T], Wildcard, Any]
 
 
-class RecordEntryCondition:
+def is_var_query(query: Any) -> TypeGuard[VarQuery]:
+    return True
+
+
+class RecordEntryCondition(Generic[T]):
     @staticmethod
     def for_other(
         var: Var, other: Any, check: Callable[[Any, Any], bool]
@@ -295,7 +527,7 @@ class RecordEntryCondition:
         else:
             return RecordEntryCondition([var], lambda x: check(x, other))
 
-    def __init__(self, vars: Iterable[Var[Any]], check: Callable[..., bool]) -> None:
+    def __init__(self, vars: Iterable[Var[T]], check: Callable[..., bool]) -> None:
         self.vars = list(vars)
         self.check = check
 
@@ -325,7 +557,7 @@ class RecordEntryCondition:
 
 class DerivedVar(Var[T], ABC):
     @abstractmethod
-    def get_value(self, record: "record.Record") -> T:
+    def get_value(self, record: "m_record.Record") -> T:
         ...
 
     @abstractmethod
@@ -350,7 +582,7 @@ class Const(DerivedVar[T]):
         self._value = self.parse(value)
         self.metadata.update()
 
-    def get_value(self, record: "record.Record") -> T:
+    def get_value(self, record: "m_record.Record") -> T:
         return self._value
 
     def get_dependencies(self) -> Iterable[Var]:
@@ -418,70 +650,84 @@ class Computed(DerivedVar[T]):
     def __init__(
         self,
         label: Any,
-        params: Iterable[Var],
-        func: Callable[..., Any] | str,
-        type_: VarTypeLike[T] | None = None,
+        expr: ExprLike[Var, T],
     ) -> None:
-        self._params = tuple(params)
+        self._expr = Expr.interpret(expr)
+        # self._expr = VarExpr.interpret(expr)
+        super().__init__(label, self._expr.value_type)
 
-        if type_ is None:
-            type_ = infer_return_type(func, [param.type.value_type for param in params])
-
-        type_ = VarType.interpret(cast(VarTypeLike, type_))
-
-        super().__init__(label, type_)
-
-        self._func = func
-        self._compute = self.compute_by(self._params, func)
-
-    @property
-    def params(self) -> tuple[Var, ...]:
-        return self._params
-
-    @params.setter
-    def params(self, params: Iterable[Var]) -> None:
-        self._params = tuple(params)
-
-    @property
-    def func(self):
-        return self._func
-
-    @func.setter
-    def func(self, func: Callable[..., Any] | str) -> None:
-        self._func = func
-        self._compute = self.compute_by(self._params, func)
-
-    def compute(self, *param_vals: Any, parse: bool = True, check: bool = True) -> T:
-        result = self._compute(*param_vals)
-
-        if parse:
-            result = self.parse(result, check=check)
-        elif check:
-            self.check(result)
-
-        return cast(T, result)
-
-    @property
-    def type(self) -> VarType[T]:
-        return super().type
-
-    @type.setter
-    def type(self, type_: VarTypeLike[T]) -> None:
-        super().type = type_
-        self.func = self._func  # Trigger func setter
-
-    def __call__(self, *args: Any) -> T:
-        if len(args) != len(self.params):
-            raise TypeError(f"Expected {len(self.params)} arguments, got {len(args)}.")
-
-        parsed_args = [param.parse(arg) for param, arg in zip(self.params, args)]
-
-        result = self.compute(*parsed_args)
-
+    def _compute_for_args(self, *args) -> T:
+        result = self._expr.evaluate(
+            *args, check_type=False
+        )  # Type checking is done by parse function
         return self.parse(result)
 
-    def get_value(self, record: "record.Record") -> T:
-        return self(*[record[param] for param in self.params])
+    def get_value(self, record: "m_record.Record") -> T:
+        # print(
+        #     "get value of", self.equality_text.ascii, "with symbols", self._expr.symbols
+        # )
+        args = [record[var] for var in self._expr.symbols]
+        # print("-> args:", args)
+        return self._compute_for_args(*args)
 
-    def get_dependencies(self) -> Iterable[Var]:
-        return self.params
+    def get_dependencies(self) -> list[Var]:
+        return self._expr.symbols
+
+    @overload
+    def __call__(self, record: "m_record.Record", /) -> T:
+        ...
+
+    @overload
+    def __call__(self, *args) -> T:
+        ...
+
+    def __call__(self, *args, as_args: bool = False) -> T:
+        if not as_args and len(args) == 1 and m_record.is_record_like(args[0]):
+            return self.get_value(m_record.Record.interpret(args[0]))
+        else:
+            return self._compute_for_args(*args)
+
+    @property
+    def functional_label(self):
+        return self.label + lang.par(
+            Text(", ").join(var.name for var in self._expr.symbols)
+        )
+
+    @property
+    def equality_text(self):
+        return self.functional_label + " = " + self._expr.text
+
+
+class FunctionComputed(DerivedVar[T]):
+    def __init__(
+        self,
+        label: Any,
+        function: Callable[["m_record.Record"], T],
+        type_: VarTypeLike[T] | None = None,
+        dependencies: Iterable[Var] | None = None,
+    ) -> None:
+        self._function = function
+
+        if dependencies is None:
+            observer_record = m_record.ObserverRecord()
+            self._function(observer_record)
+            dependencies = observer_record.accessed_vars
+
+        self._dependencies = list(dependencies)
+
+        super().__init__(label, type_ or infer_return_type(function))
+
+    def get_value(self, record: "m_record.Record") -> T:
+        return self._function(record)
+
+    def get_dependencies(self) -> list[Var]:
+        return self._dependencies
+
+    def __call__(self, record: "m_record.RecordLike", /) -> T:
+        return self.get_value(m_record.Record.interpret(record))
+
+    @property
+    def functional_label(self):
+        return self.label + lang.par(
+            Text(", ").join(var.name for var in self._dependencies)
+        )

@@ -3,7 +3,7 @@ import operator
 import time
 from typing import Any, Callable, Generic, Iterable, TypeVar, cast, overload
 
-from ..util import format_args
+from ..internal_util import format_args
 
 T = TypeVar("T")
 

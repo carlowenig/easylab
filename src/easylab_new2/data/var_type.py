@@ -3,16 +3,18 @@ import math
 from typing import Any, Callable, Generic, TypeVar, Union, cast
 from typing_extensions import TypeGuard
 
-from ..util.misc import sanitize_arg_name
-from ..lang import Text
-from ..util import Undefined, undefined, is_wildcard
+from ..internal_util.misc import sanitize_arg_name
+from ..lang import Text, lang
+from ..internal_util import Undefined, undefined, is_wildcard
 import inflection
 from . import var
 
 
 T = TypeVar("T")
 
-VarTypeLike = Union["VarType[T]", type[T]]
+VarTypeLike = Union[
+    "VarType[T]", type[T], tuple[type[T], T], tuple[type[T], Callable[[], T]]
+]
 
 
 def is_var_type_like(value: Any) -> TypeGuard[VarTypeLike]:
@@ -35,6 +37,12 @@ class VarType(Generic[T]):
                 return VarType.__registered_types[input]
             else:
                 return VarType(input)
+        elif isinstance(input, tuple) and len(input) == 2:
+            var_type, default = input
+            if callable(default) and not isinstance(default, var_type):
+                return VarType(var_type, default=default)
+            else:
+                return VarType(var_type, default=lambda: default)
         else:
             raise TypeError(f"Cannot interpret {input} as VarType.")
 
@@ -241,6 +249,15 @@ class VarType(Generic[T]):
 
         raise ValueError(f"Cannot match VarType with {query}.")
 
+    def __repr__(self) -> str:
+        return f"VarType({self.name})"
+
+    def __str__(self) -> str:
+        return self.name
+    
+    def list(self):
+        return list_var_type(self)
+
 
 def decimal_var_type(prec: int | None = None):
     return VarType[float](
@@ -250,6 +267,21 @@ def decimal_var_type(prec: int | None = None):
         format=(lambda x: f"{x:.{prec}f}") if prec is not None else None,
         parse=float,
         equal=(lambda a, b: abs(a - b) < 10 ** (-prec)) if prec is not None else None,
+    )
+
+
+def list_var_type(element_type: VarTypeLike[T]) -> VarType[list[T]]:
+    element_type_ = VarType.interpret(element_type)
+
+    return VarType[list[T]](
+        list,
+        name=f"list({element_type_.name})",
+        default=lambda: [],
+        format=lambda x: lang.brack(
+            Text(", ").join(element_type_.format(e) for e in x)
+        ),
+        parse=lambda x: [element_type_.parse(e) for e in x],
+        equal=lambda a, b: all(element_type_.equal(e1, e2) for e1, e2 in zip(a, b)),
     )
 
 

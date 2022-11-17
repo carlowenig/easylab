@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 import getpass
 from typing import Any, Union
-from ..util import is_wildcard
+from ..internal_util import is_wildcard
 
 
 def get_current_username():

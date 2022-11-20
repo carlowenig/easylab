@@ -370,7 +370,7 @@ class Record(Generic[T]):
     _entries: list[RecordEntry[T]]
 
     def __init__(
-        self, entries: RecordInput[T], *, metadata_hint: Metadata | None = None
+        self, entries: RecordInput[T] = [], *, metadata_hint: Metadata | None = None
     ) -> None:
         if isinstance(entries, dict):
             entries_ = ((cast(Var, var), value) for var, value in entries.items())

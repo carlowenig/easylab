@@ -426,40 +426,164 @@ class Data(ABC, Generic[T]):
 
         return result
 
-    def plot_all(self):
+    def plot_all(self, *, single_plot=False):
         vars = self.get_vars()
         import matplotlib.pyplot as plt
 
-        fig, axes = plt.subplots(len(vars), len(vars), sharex=True, sharey=True)
+        if single_plot:
+            fig, axes = plt.subplots(len(vars), len(vars), sharex=True, sharey=True)
 
-        for i, x in enumerate(vars):
+            for i, x in enumerate(vars):
+                for j, y in enumerate(vars):
+                    self.plot(x, y, ax=axes[i][-1 - j], axes_labels=False)
+
+            for i, x in enumerate(vars):
+                axes[i][0].set_ylabel(x.label.latex)
+
             for j, y in enumerate(vars):
-                self.plot(x, y, ax=axes[i][-1 - j], axes_labels=False)
+                axes[-1][-1 - j].set_xlabel(y.label.latex)
 
-        for i, x in enumerate(vars):
-            axes[i][0].set_ylabel(x.label.latex)
+            plt.subplots_adjust(wspace=0, hspace=0)
 
-        for j, y in enumerate(vars):
-            axes[-1][-1 - j].set_xlabel(y.label.latex)
+            return fig, axes
+        else:
+            figs = []
+            axes_list = []
+            for i, x in enumerate(vars):
+                fig, axes = plt.subplots(
+                    len(vars) - 1, 1, figsize=(6, 2 * (len(vars) - 1)), sharex=True
+                )
+                j = 0
+                for y in vars:
+                    if y is x:
+                        continue
+                    self.plot(x, y, ax=axes[j], axes_labels=False)
+                    axes[j].set_ylabel(y.label.latex)
+                    j += 1
 
-        plt.subplots_adjust(wspace=0, hspace=0)
+                axes[-1].set_xlabel(x.label.latex)
+                figs.append(fig)
+                axes_list.append(axes)
+                plt.subplots_adjust(hspace=0)
+                plt.show()
 
-        return fig, axes
+            return figs, axes_list
 
     def inspect(self):
         import matplotlib.pyplot as plt
         import ipywidgets as widgets
-        from IPython.display import display, clear_output
+        from IPython.display import display
         import pandas as pd
 
         vars = self.get_vars()
 
+        x_value = vars[0].label.ascii
+
         x_input = widgets.Text(
-            description="x", value=vars[0].label.ascii, continuous_update=False
+            placeholder="x-axis", value=x_value, continuous_update=False
         )
-        y_input = widgets.Text(
-            description="y", value=vars[1].label.ascii, continuous_update=False
-        )
+
+        def on_x_change(change):
+            nonlocal x_value
+            x_value = change.new
+            update_plot()
+
+        x_input.observe(on_x_change, names="value")  # type: ignore
+
+        graph_inputs: list[widgets.HBox] = []
+        graph_labels: list[str] = []
+        graph_values: list[str] = []
+        graph_colors = []
+        graph_label_enabled_states: list[bool] = []
+
+        def create_graph_input():
+            input = widgets.HBox(
+                layout={
+                    "border": "solid 2px #eee",
+                    # "padding": "1rem",
+                    "margin": "0.5rem",
+                    "width": "100%",
+                }
+            )
+
+            def get_index():
+                return graph_inputs.index(input)
+
+            label_text = widgets.Text(
+                placeholder="label",
+                value=f"Graph {len(graph_inputs) + 1}",
+                continuous_update=False,
+                layout={"width": "8rem"},
+            )
+
+            def on_label_change(change):
+                graph_labels[get_index()] = change.new
+
+            label_text.observe(on_label_change, names="value")  # type: ignore
+
+            value_text = widgets.Text(
+                placeholder="value",
+                value=vars[1].label.ascii,
+                continuous_update=False,
+                layout={"width": "8rem"},
+            )
+
+            def on_value_change(change):
+                graph_values[get_index()] = change.new
+
+            value_text.observe(on_value_change, names="value")  # type: ignore
+
+            color_picker = widgets.ColorPicker(
+                # concise=True,
+                placeholder="color",
+                value="black",
+                layout={"width": "6rem"},
+            )
+
+            def on_color_changed(change):
+                graph_colors[get_index()] = change.new
+
+            color_picker.observe(on_color_changed, names="value")  # type: ignore
+
+            toggle_label_button = widgets.Checkbox(
+                description="show label",
+                value=True,
+            )
+
+            def on_toggle_label(change):
+                graph_label_enabled_states[get_index()] = change.new
+
+            toggle_label_button.observe(on_toggle_label, names="value")  # type: ignore
+
+            remove_button = widgets.Button(
+                # description="remove",
+                button_style="danger",
+                icon="trash",
+            )
+
+            def on_remove_button_click(b):
+                input.close()
+                graph_inputs.remove(input)
+
+            remove_button.on_click(on_remove_button_click)
+
+            input.children = (
+                label_text,
+                value_text,
+                color_picker,
+                toggle_label_button,
+                remove_button,
+            )
+            return input
+
+        graph_inputs.append(create_graph_input())
+
+        add_graph_button = widgets.Button(description="Add graph")
+
+        def on_add_graph_button_click(b):
+            graph_inputs.append(create_graph_input())
+
+        add_graph_button.on_click(on_add_graph_button_click)
 
         def create_plot_var(input_str: str, label: Any):
             expr = Expr.parse(
@@ -486,23 +610,30 @@ class Data(ABC, Generic[T]):
                 plt.show()
 
         # fig, ax = plt.subplots()
-        def update(x_str, y_str):
+        def update_plot():
             table_output.clear_output(True)
             plot_output.clear_output(True)
 
             try:
-                x = create_plot_var(x_str, "x")
-                y = create_plot_var(y_str, "y")
+                x_var = create_plot_var(x_value, "x")
+                graph_vars = [
+                    create_plot_var(graph_value, f"y_{i}")
+                    for i, graph_value in enumerate(graph_values)
+                ]
             except Exception as e:
                 show_exception(e)
                 return
 
-            plot_data = ListData(
-                [
-                    {x: x_value, y: y_value}
-                    for x_value, y_value in zip(self.get_values(x), self.get_values(y))
-                ]
-            )
+            plot_records = []
+
+            for record in self:
+                plot_record = Record()
+                plot_record[x_var] = record[x_var]
+                for graph_var in graph_vars:
+                    plot_record[graph_var] = record[graph_var]
+                plot_records.append(plot_record)
+
+            plot_data = ListData(plot_records)
 
             # table_data = self.copy()
             # table_data.add(x)
@@ -511,29 +642,43 @@ class Data(ABC, Generic[T]):
             with plot_output:
                 _, ax = plt.subplots(figsize=(8, 6))
                 try:
-                    plot_data.plot(x, y, ax=ax)
+                    for i, graph_var in enumerate(graph_vars):
+                        plot_data.plot(
+                            x_var,
+                            graph_var,
+                            ax=ax,
+                            label=graph_labels[i]
+                            if graph_label_enabled_states[i]
+                            else None,
+                            color=graph_colors[i],
+                        )
                     plt.show()
                 except Exception as e:
                     show_exception(e)
 
-            table_html = tabulate(
-                plot_data.format_for_target("latex").to_list_of_dicts(),
-                headers="keys",
-                tablefmt="html",
+            # table_html = tabulate(
+            #     plot_data.format_for_target("latex").to_list_of_dicts(),
+            #     headers="keys",
+            #     tablefmt="html",
+            # )
+            # table_html = "<style>td { min-width: 120px; } </style>\n" + table_html
+            # with table_output:
+            #     display(widgets.HTMLMath(value=table_html))
+            # display(table_data.to_data_frame())
+
+        update_plot()
+
+        display(
+            widgets.VBox(
+                [
+                    x_input,
+                    *graph_inputs,
+                    add_graph_button,
+                    plot_output,
+                    # widgets.HBox([plot_output, table_output])
+                ]
             )
-            table_html = "<style>td { min-width: 120px; } </style>\n" + table_html
-            with table_output:
-                display(widgets.HTMLMath(value=table_html))
-                # display(table_data.to_data_frame())
-
-        update(vars[0].label.ascii, vars[1].label.ascii)
-
-        x_input.observe(lambda change: update(change.new, y_input.value), "value")  # type: ignore
-        y_input.observe(lambda change: update(x_input.value, change.new), "value")  # type: ignore
-
-        controls = widgets.HBox([x_input, y_input])
-
-        return widgets.VBox([controls, widgets.HBox([plot_output, table_output])])
+        )
 
 
 class ListData(Data[T]):
